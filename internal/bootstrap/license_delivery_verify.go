@@ -256,49 +256,142 @@ func runtimeComponentSetDigest(set registry.RuntimeComponentSet) (string, error)
 	return "sha256:" + hex.EncodeToString(sum[:]), nil
 }
 
-func offlineEnforcementStatusV2(state domain.State, app string, status coordination.Status, specs []coordination.ServiceSpec, verify offlineSnapshotVerification, now time.Time) error {
-	failure := func() error {
-		return fmt.Errorf("%w: %s requires the full approved current snapshot and fresh consumer ACKs", ErrOfflineEnforcementIncomplete, app)
+// offlineEnforcementStatusV2 用途：核验当前内置组件集合，并定位未通过的许可事实。
+// 参数：state 为许可观察，app/status/specs 为应用事实，verify 验签，now 为核验时间。
+// 返回值：完整确认返回 nil，否则返回不含签名材料的分类错误。
+func offlineEnforcementStatusV2(
+	state domain.State, app string, status coordination.Status,
+	specs []coordination.ServiceSpec, verify offlineSnapshotVerification, now time.Time,
+) error {
+	if status.Application.Application != app ||
+		status.Application.RegistrationMode != catalog.BuiltinComponentV2 ||
+		status.State != runtime.Enforced || status.MigrationEligible {
+		return offlineEnforcementFailure(app, "", "APPLICATION_STATE_INVALID")
 	}
-	if status.Application.Application != app || status.Application.RegistrationMode != catalog.BuiltinComponentV2 || status.State != runtime.Enforced || status.MigrationEligible || status.Revision == 0 || status.DeploymentRevision != state.Revision || !status.SnapshotCurrent || len(specs) == 0 || len(status.Members) != len(specs) {
-		return failure()
+	if status.Revision == 0 {
+		return offlineEnforcementFailure(app, "", "APPLICATION_REVISION_INVALID")
+	}
+	if status.DeploymentRevision != state.Revision {
+		return offlineEnforcementFailure(app, "",
+			"DEPLOYMENT_REVISION_CHANGED: retry a consistent license observation")
+	}
+	if !status.SnapshotCurrent {
+		return offlineEnforcementFailure(app, "",
+			"SNAPSHOT_CONTENT_STALE: wait for consumers to synchronize current license content")
+	}
+	if len(specs) == 0 || len(status.Members) != len(specs) {
+		return offlineEnforcementFailure(app, "", "COMPONENT_SET_INCOMPLETE")
 	}
 	expected := make(map[string]coordination.ServiceSpec, len(specs))
 	for _, spec := range specs {
-		if spec.Application != app || spec.Environment != "prod" || spec.ServiceID == "" || spec.RegistrationProtocol != catalog.RegistrationProtocolV2 || spec.CatalogVersion == 0 || spec.CredentialGeneration == "" || expected[spec.ServiceID].ServiceID != "" {
-			return failure()
+		if spec.Application != app || spec.Environment != "prod" || spec.ServiceID == "" ||
+			spec.RegistrationProtocol != catalog.RegistrationProtocolV2 ||
+			spec.CatalogVersion == 0 || spec.CredentialGeneration == "" ||
+			expected[spec.ServiceID].ServiceID != "" {
+			return offlineEnforcementFailure(app, "", "COMPONENT_SET_INVALID")
 		}
 		expected[spec.ServiceID] = spec
 	}
 	for _, member := range status.Members {
 		spec, ok := expected[member.ServiceID]
-		if !ok || member.Application != app || member.Environment != spec.Environment || member.OAuthClientID != spec.OAuthClientID || member.RegistrationProtocol != spec.RegistrationProtocol || member.CatalogVersion != spec.CatalogVersion || member.CredentialGeneration != spec.CredentialGeneration || member.RetiredAt != nil || member.IssuedRevision != status.Revision || member.AckRevision != status.Revision || member.ReadyAt == nil || member.AckAt == nil {
-			return failure()
+		if !ok || member.Application != app || member.Environment != spec.Environment ||
+			member.OAuthClientID != spec.OAuthClientID ||
+			member.RegistrationProtocol != spec.RegistrationProtocol ||
+			member.CatalogVersion != spec.CatalogVersion ||
+			member.CredentialGeneration != spec.CredentialGeneration || member.RetiredAt != nil {
+			return offlineEnforcementFailure(app, member.ServiceID, "MEMBER_IDENTITY_MISMATCH")
 		}
-		// V2 的 image/coverage 只保留为诊断字段，不是商业授权等值门槛。
-		for _, heartbeat := range []*time.Time{member.ReadyAt, member.AckAt} {
-			if heartbeat.IsZero() || now.Sub(*heartbeat) > time.Minute || heartbeat.After(now.Add(time.Second)) {
-				return failure()
-			}
+		if member.IssuedRevision != status.Revision || member.AckRevision != status.Revision {
+			return offlineEnforcementFailure(app, member.ServiceID,
+				"MEMBER_REVISION_MISMATCH: issued and ACK must match the application revision")
 		}
-		digest := sha256.Sum256([]byte(member.RawJWS))
-		if member.RawJWS == "" || member.IssuedDigest != hex.EncodeToString(digest[:]) {
-			return failure()
+		if err := offlineMemberConfirmation(app, member, now); err != nil {
+			return err
 		}
-		snapshot, err := verify(member.RawJWS, runtime.Binding{InstanceID: state.InstanceID, Environment: state.Environment, Application: app, ServiceID: member.ServiceID})
-		if err != nil || snapshot.Revision != status.Revision || snapshot.EnforcementState != runtime.Enforced || snapshot.MigrationEligible || snapshot.HighestLicenseVersion != state.HighestVersion || snapshot.SnapshotIssuedAt > now.Unix() {
-			return failure()
-		}
-		for _, slot := range []struct{ raw, digest string }{{snapshot.CurrentLicenseJWS, state.CurrentDigest}, {snapshot.PendingLicenseJWS, state.PendingDigest}} {
-			hash := sha256.Sum256([]byte(slot.raw))
-			if (slot.digest == "" && slot.raw != "") || (slot.digest != "" && (slot.raw == "" || hex.EncodeToString(hash[:]) != slot.digest)) {
-				return failure()
-			}
+		if err := offlineMemberSnapshot(state, app, status.Revision, member, verify, now); err != nil {
+			return err
 		}
 		delete(expected, member.ServiceID)
 	}
 	if len(expected) != 0 {
-		return failure()
+		return offlineEnforcementFailure(app, "", "COMPONENT_SET_INCOMPLETE")
+	}
+	return nil
+}
+
+// offlineEnforcementFailure 用途：生成可定位应用与组件且不含许可材料的诊断。
+// 参数：app 为应用，service 为可选组件，reason 为内部固定原因及处理提示。
+// 返回值：保留 ErrOfflineEnforcementIncomplete 的错误链。
+func offlineEnforcementFailure(app, service, reason string) error {
+	if service != "" {
+		return fmt.Errorf("%w: %s component %s: %s", ErrOfflineEnforcementIncomplete, app, service, reason)
+	}
+	return fmt.Errorf("%w: %s: %s", ErrOfflineEnforcementIncomplete, app, reason)
+}
+
+// offlineHeartbeatReason 用途：按既有一分钟窗口分类消费者确认时间。
+// 参数：signal 为 READY 或 ACK，heartbeat 为确认时间，now 为同次观察时间。
+// 返回值：当前返回空串，否则返回缺失、过期或未来时间原因码。
+func offlineHeartbeatReason(signal string, heartbeat *time.Time, now time.Time) string {
+	if heartbeat == nil || heartbeat.IsZero() {
+		return signal + "_MISSING"
+	}
+	if heartbeat.After(now.Add(time.Second)) {
+		return signal + "_FUTURE"
+	}
+	if now.Sub(*heartbeat) > time.Minute {
+		return signal + "_STALE: older than 60 seconds; inspect consumer synchronization"
+	}
+	return ""
+}
+
+// offlineMemberConfirmation 用途：逐项核验消费者 READY 与 ACK 的新鲜度。
+// 参数：app 为应用，member 为持久成员，now 为本次观察时间。
+// 返回值：两项当前返回 nil，否则返回组件级安全诊断。
+func offlineMemberConfirmation(app string, member coordination.Member, now time.Time) error {
+	for _, signal := range []struct {
+		name string
+		at   *time.Time
+	}{{"READY", member.ReadyAt}, {"ACK", member.AckAt}} {
+		if reason := offlineHeartbeatReason(signal.name, signal.at, now); reason != "" {
+			return offlineEnforcementFailure(app, member.ServiceID, reason)
+		}
+	}
+	return nil
+}
+
+// offlineMemberSnapshot 用途：复核成员签名快照及其绑定的当前许可内容。
+// 参数：state/app/revision 为可信目标，member 为成员，verify 验签，now 为观察时间。
+// 返回值：快照完全一致返回 nil，否则分类报错且不传播底层签名材料。
+func offlineMemberSnapshot(
+	state domain.State, app string, revision uint64, member coordination.Member,
+	verify offlineSnapshotVerification, now time.Time,
+) error {
+	digest := sha256.Sum256([]byte(member.RawJWS))
+	if member.RawJWS == "" || member.IssuedDigest != hex.EncodeToString(digest[:]) {
+		return offlineEnforcementFailure(app, member.ServiceID, "SNAPSHOT_DIGEST_MISMATCH")
+	}
+	snapshot, err := verify(member.RawJWS, runtime.Binding{
+		InstanceID: state.InstanceID, Environment: state.Environment,
+		Application: app, ServiceID: member.ServiceID,
+	})
+	if err != nil {
+		return offlineEnforcementFailure(app, member.ServiceID, "SNAPSHOT_SIGNATURE_INVALID")
+	}
+	if snapshot.Revision != revision || snapshot.EnforcementState != runtime.Enforced ||
+		snapshot.MigrationEligible || snapshot.HighestLicenseVersion != state.HighestVersion ||
+		snapshot.SnapshotIssuedAt > now.Unix() {
+		return offlineEnforcementFailure(app, member.ServiceID, "SNAPSHOT_PAYLOAD_MISMATCH")
+	}
+	for _, slot := range []struct{ raw, digest string }{
+		{snapshot.CurrentLicenseJWS, state.CurrentDigest},
+		{snapshot.PendingLicenseJWS, state.PendingDigest},
+	} {
+		hash := sha256.Sum256([]byte(slot.raw))
+		if (slot.digest == "" && slot.raw != "") ||
+			(slot.digest != "" && (slot.raw == "" || hex.EncodeToString(hash[:]) != slot.digest)) {
+			return offlineEnforcementFailure(app, member.ServiceID, "SNAPSHOT_LICENSE_CONTENT_MISMATCH")
+		}
 	}
 	return nil
 }

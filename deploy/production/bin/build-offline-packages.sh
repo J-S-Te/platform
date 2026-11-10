@@ -962,6 +962,9 @@ enabled_compose_modules() {
   done
 }
 
+# package_assets 用途：按固定白名单打包离线部署资产。
+# 参数：无；使用当前构建目标及版本配置。
+# 返回值：成功生成资产归档及校验文件，否则返回非零。
 package_assets() (
   local assets_archive assets_temporary sidecar_temporary assets_stage relative destination assets_digest
   local -a asset_files=(
@@ -970,7 +973,7 @@ package_assets() (
     bin/build-evidence.py bin/build-host-dependencies.sh bin/build-offline-packages.sh bin/compose-scope.sh bin/deploy-common.sh bin/deploy-import.sh bin/deploy-subsystem.sh bin/deploy-license.sh bin/deploy-doctor.sh bin/deploy-package.sh bin/deploy-status.sh bin/deploy-verify.sh bin/deploy-menu.sh bin/deploy-registry.sh bin/deploy-customer-opportunity.sh bin/deploy-service.sh bin/deploy.sh
     bin/drill-file-gateway-restore.sh bin/install-assets.sh bin/lifecycle.sh bin/offline-base.Dockerfile bin/project-background.sh
     bin/install-host-dependencies.sh bin/initialize-audit-hash-key.py bin/platform-mysql-command.py
-    bin/release-backup-policy.py
+    bin/release-backup-policy.py bin/release-image-prune.py
     bin/project-compose-assets.py bin/check-asset-bundle.py bin/check-license-runtime.py bin/check-runtime-env-hygiene.py
     bin/offline-configure.sh bin/offline-package-metadata.sh bin/offline-build-inputs.sh bin/offline-frontend-selection.sh bin/offline-image-identities.py
     bin/export-license-inventory.py bin/frontend-network.py bin/check-frontend-network.sh bin/subsystem-runtime.py
