@@ -126,6 +126,7 @@ jobs:
           python3 -B scripts/test_unlock_locked_account.py
           python3 -B scripts/test_subsystem_lifecycle.py
           python3 -B scripts/test_subsystem_connect_origin.py
+          python3 -B scripts/test_reimbursement_infrastructure.py
           # 本地开发/运维入口（local-status / docker-local / 系统编排）的回归：全部用
           # 临时工作区与 PATH 桩，不接触真实 Docker/MySQL/网络，也不读写运行状态文件。
           # 每个用例都加 timeout，避免个别场景在 runner 上长时间挂起卡住 test job。

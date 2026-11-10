@@ -98,8 +98,9 @@ var componentsByApplication = map[string][]Component{
 	},
 }
 
-// Applications 返回目录内全部商业应用码的已排序副本。
-// 返回值与内部目录隔离，调用方可安全修改。
+// Applications 用途：返回目录内全部商业应用码的已排序副本。
+// 参数：无。
+// 返回值：与内部目录隔离的已排序应用码，调用方可安全修改。
 func Applications() []string {
 	applications := make([]string, 0, len(componentsByApplication))
 	for application := range componentsByApplication {

@@ -14,7 +14,12 @@ usage() {
   exit 2
 }
 
-service="$1"
+if [[ $# -eq 1 && "$1" == --capabilities ]]; then
+  printf '%s\n' REIMBURSEMENT_PREPARE_ONLY_V1
+  exit 0
+fi
+
+service="${1:-}"
 if [[ "$service" == "data-analysis" ]]; then
   [[ $# -eq 5 ]] || usage
   data_analysis_dashboard_image="$2"
@@ -50,6 +55,37 @@ case "$service" in
     ;;
   *) usage ;;
 esac
+
+# validate_prepare_only 限定暂存开关只能用于报销且必须是明确布尔值。
+# 参数：暂存开关值及本次发布的受控服务标识。
+# 返回值：合法时零；非法值或其他服务启用时返回二。
+validate_prepare_only() {
+  case "$1" in
+    false) return 0 ;;
+    true) [[ "$2" == reimbursement ]] && return 0 ;;
+  esac
+  echo 'DEPLOY_PREPARE_ONLY 必须为 true/false，且仅报销支持 true' >&2
+  return 2
+}
+prepare_only="${DEPLOY_PREPARE_ONLY-false}"
+validate_prepare_only "$prepare_only" "$service" || exit 2
+
+# prepare_reimbursement_infrastructure 在已有备份和发布锁内准备首次安装基础设施。
+# 参数：无；使用已验证的部署目录和继承的发布锁描述符九。
+# 返回值：受控助手成功时零；缺失、版本不符或事务失败时非零。
+prepare_reimbursement_infrastructure() {
+  local helper="$script_dir/prepare-reimbursement-infrastructure.py" capability
+  [[ -f "$helper" && ! -L "$helper" ]] || {
+    echo '缺少报销基础设施准备助手，拒绝暂存' >&2
+    return 1
+  }
+  capability="$(python3 -B "$helper" --capabilities 2>/dev/null)" || return 1
+  [[ "$capability" == REIMBURSEMENT_INFRASTRUCTURE_PREPARE_V1 ]] || {
+    echo '报销基础设施准备助手版本不匹配，拒绝暂存' >&2
+    return 1
+  }
+  python3 -B "$helper" --deploy-root "$deploy_dir" --deployment-lock-fd 9
+}
 
 acr_enterprise_or_new_personal='^[a-z0-9.-]+\.cr\.aliyuncs\.com/[a-z0-9._/-]+@sha256:[a-f0-9]{64}$'
 acr_legacy_personal='^registry(-vpc)?\.[a-z0-9-]+\.aliyuncs\.com/[a-z0-9._/-]+@sha256:[a-f0-9]{64}$'
@@ -401,11 +437,14 @@ if [[ -f "$script_dir/release-backup-policy.py" && ! -L "$script_dir/release-bac
     release_backup_policy=backup
   fi
 fi
-if [[ "$release_backup_policy" == skip ]]; then
+if [[ "$release_backup_policy" == skip && "$prepare_only" != true ]]; then
   echo '[信息] 首次安装尚未完成且平台阶段从未发布，没有可回滚的既有发布；跳过发布前完整备份（平台库迁移前备份仍保留）' >&2
 elif ! bash "$script_dir/backup-all.sh" --if-existing --deployment-lock-fd 9; then
   echo '发布前完整备份失败，未修改运行配置或镜像版本指针；拒绝继续更新' >&2
   exit 1
+fi
+if [[ "$prepare_only" == true ]]; then
+  prepare_reimbursement_infrastructure || exit 1
 fi
 case "$service" in
   contract)
@@ -2397,6 +2436,13 @@ fi
 
 # 首次上线时子系统镜像会先于浏览器接入发布。此时 OIDC 与机器凭据尚未生成，不能启动
 # 子系统 API，但必须保留不可变 digest，供生产 Agent 在页面接入时迁移并启动。
+if [[ "$prepare_only" == true ]]; then
+  # 此处仍持有发布锁；镜像已拉取并完成配置校验、控制面刷新。
+  # 无论运行配置是否完整都只保留指针，不能进入业务启动或迁移。
+  rm -f "$previous_release"
+  echo 'PREPARED: 报销不可变镜像已安全暂存；未部署业务、未执行迁移或接入'
+  exit 0
+fi
 if [[ "$service" == "contract" ]] && ! contract_runtime_ready; then
   if [[ "$fail_if_runtime_not_ready" == "true" ]]; then
     mv -f "$previous_release" "$release_file"
