@@ -46,6 +46,16 @@ func (handler *SubsystemOnboardingHandler) writeError(writer stdhttp.ResponseWri
 				"next_action": "该环境的控制面记录已存在。若此前未完成部署，请使用 subsystem.sh update/retry 继续受控部署，不要重复 onboard",
 			},
 		))
+	case errors.Is(err, errRelatedReimbursementCostDependency):
+		handler.logger.Warn("subsystem source credential dependency unavailable",
+			"path", request.URL.Path, "source_application", "settlement", "error", err)
+		httpresponse.WriteError(writer, request, stdhttp.StatusConflict, httperror.New(
+			"IAM_SUBSYSTEM_REIMBURSEMENT_COST_DEPENDENCY_REQUIRED",
+			"报销成本候选入口的结算只读机器身份不可用",
+			map[string]string{
+				"source_application": "settlement",
+				"next_action":        "请核对同租户同环境的结算系统，受控补齐独立费用候选读取身份后重试报销更新",
+			}))
 	case errors.Is(err, errRelatedSettlementReferenceDependency):
 		handler.logger.Warn("subsystem source credential dependency unavailable",
 			"path", request.URL.Path, "source_application", "settlement", "error", err)
