@@ -80,10 +80,9 @@ license_runtime_gate() {
   return 1
 }
 
-# preserve_renewal_license 把已导入平台、但未能替换为正式交付件的新许可证复制到可写的
-# runtime/ 作为恢复件。交付许可证目录整体以只读方式挂载进容器，替换失败本身也可能来自
-# 宿主机许可目录不可写，因此恢复件优先落在 runtime/；复制失败时不动暂存件，由调用方打印
-# 暂存件路径。成功时输出恢复件的绝对路径，失败时返回非零且不留下空文件。
+# preserve_renewal_license 在交付许可证替换失败后保存可恢复的新证。
+# 参数：第一个参数为已导入平台的暂存新证，deploy_dir为部署根目录。
+# 返回值：成功输出0600恢复件绝对路径；失败返回非零并保留原暂存件。
 preserve_renewal_license() {
   local staged="${1:?暂存许可证必填}" recovery
   if [[ ! -d "$deploy_dir/runtime" ]]; then
@@ -98,6 +97,9 @@ preserve_renewal_license() {
   return 1
 }
 
+# renew_delivery_license 导入续期并替换交付许可证，替换失败时保留恢复材料。
+# 参数：第一个参数为已有签署续期许可证的常规文件路径。
+# 返回值：导入、替换及激活全部完成返回0；任一步失败返回非零。
 renew_delivery_license() {
   local source="${1:?必须提供已签署续期许可证路径}" source_dir source_name staged recovery
   require_initialized

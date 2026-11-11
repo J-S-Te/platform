@@ -92,13 +92,17 @@ workflow_publish() {
   workflow_done "$stage"
 }
 
+# 用途：先尝试复用精确导入证据，未命中时重导冻结包并严格验证。
+# 参数：stage 为阶段，proof 为只读证明，action 为导入动作，其余为组件和包。
+# 返回值：只有最终证明成功才完成阶段；失败保留最终诊断。
 workflow_import() {
   local stage="$1" proof="$2" action="$3"; shift 3
   workflow_start "$stage" || return $?
-  if "$proof" "$@"; then
+  if "$proof" "$@" 2>/dev/null; then
     printf '[恢复核验] %s 的包记录、本机镜像及本地仓库对象一致。\n' "$stage"
   else
     # 重新导入确切冻结包可修复被驱逐缓存，不会发布服务或重放数据库迁移。
+    printf '[导入准备] %s 暂无可复用的完整证明，重新导入本次冻结包后再核验。\n' "$stage"
     "$action" "$@" || return $?
     "$proof" "$@" || return 1
   fi
@@ -119,6 +123,9 @@ workflow_summary() {
   printf '服务器继续：使用原安装命令并追加 --resume（介质、模式和选项须保持一致）。\n'
 }
 
+# 用途：保留原失败结论、记录阶段状态，并清理入口的私有临时声明。
+# 参数：无；读取触发 EXIT 时的退出码和当前会话。
+# 返回值：以原退出码结束，不让清理覆盖部署结果。
 workflow_exit() {
   local result=$? stage
   trap - EXIT
@@ -129,6 +136,9 @@ workflow_exit() {
       workflow_update "$stage" FAILED COMMAND_FAILED || printf '[警告] 无法写入失败状态；请保留会话目录。\n' >&2
     fi
     workflow_summary || true
+  fi
+  if declare -F cleanup_media_compatibility >/dev/null; then
+    cleanup_media_compatibility || printf '[警告] 无法清理兼容性声明临时目录。\n' >&2
   fi
   exit "$result"
 }

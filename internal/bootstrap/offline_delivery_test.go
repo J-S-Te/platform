@@ -454,6 +454,38 @@ func TestEnforcementCompleteRejectsStaleOrMissingMembers(t *testing.T) {
 	}
 }
 
+// TestOfflineActivationWaitsForFreshConfirmation 用途：防止已强制执行但失联的组件冒充激活完成。
+// 参数：t 为测试上下文。
+// 返回值：无；未等待自然确认或意外发起重复激活时失败。
+func TestOfflineActivationWaitsForFreshConfirmation(t *testing.T) {
+	for _, signal := range []string{"ready", "ack", "future"} {
+		t.Run(signal, func(t *testing.T) {
+			runner, _, _, coordinator, _ := offlineFixture(t)
+			now, old := time.Now(), time.Now().Add(-2*time.Minute)
+			member := coordination.Member{ReadyAt: &now, AckAt: &now, IssuedRevision: 2, AckRevision: 2}
+			if signal == "ready" {
+				member.ReadyAt = &old
+			} else if signal == "ack" {
+				member.AckAt = &old
+			} else {
+				future := now.Add(time.Minute)
+				member.ReadyAt = &future
+			}
+			coordinator.status.State = runtime.Enforced
+			coordinator.status.Members = []coordination.Member{member}
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+			defer cancel()
+			out, err := runner.Activate(ctx, "signed")
+			if !errors.Is(err, context.DeadlineExceeded) || out.Status == "ENFORCED" {
+				t.Fatalf("stale %s must wait for live confirmation: %+v %v", signal, out, err)
+			}
+			if coordinator.calls != 0 {
+				t.Fatal("already enforced application was activated again")
+			}
+		})
+	}
+}
+
 func TestOfflineImportAndActivateReusesActivationPipeline(t *testing.T) {
 	r, _, l, c, o := offlineFixture(t)
 	out, err := r.ImportAndActivate(context.Background(), "signed")

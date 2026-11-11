@@ -12,6 +12,10 @@
 # 退出码：0 成功；1 环境不满足；2 参数错误。
 set -Eeuo pipefail
 
+# 显式给出 DOCKER_ROOT（测试/非标准安装）时不自动 sudo 提权：调用方自己决定权限。
+DOCKER_ROOT_EXPLICIT=false
+[[ -n "${DOCKER_ROOT:-}" ]] && DOCKER_ROOT_EXPLICIT=true
+
 # Docker 数据根目录可能被运维改到独立磁盘（测试服务器就不是 /var/lib/docker）。
 # 探测顺序：显式 DOCKER_ROOT → docker CLI（普通/sudo）→ 常见安装路径 → 默认值。
 detect_docker_root() {
@@ -43,7 +47,27 @@ for arg in "$@"; do
   esac
 done
 
-[[ -d "$DOCKER_ROOT/containers" ]] || { echo "container log directory not found: $DOCKER_ROOT/containers" >&2; exit 1; }
+# /var/lib/docker 通常 root:root 0710，即使部署用户在 docker 组里也无法列目录。
+# 需要读取/截断时用 sudo -n 重新执行自身（不引入交互式密码提示）。
+if [[ "$DOCKER_ROOT_EXPLICIT" != true && "${EUID:-$(id -u)}" -ne 0 && ! -r "$DOCKER_ROOT/containers" ]]; then
+  if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+    export DOCKER_ROOT
+    exec sudo -n -- "$0" "$@"
+  fi
+fi
+
+if [[ ! -d "$DOCKER_ROOT/containers" ]]; then
+  echo "container log directory not found: $DOCKER_ROOT/containers" >&2
+  echo "---- docker data root diagnostics ----" >&2
+  id >&2 || true
+  command -v docker >&2 || echo 'docker CLI not in PATH' >&2
+  docker info --format '{{.DockerRootDir}}' 2>&1 | head -3 >&2 || true
+  sudo -n docker info --format '{{.DockerRootDir}}' 2>&1 | head -3 >&2 || true
+  for base in /data /mnt /opt /home /var/lib /srv; do
+    find "$base" -maxdepth 4 -type d -name containers 2>/dev/null | head -5 >&2 || true
+  done
+  exit 1
+fi
 
 truncate_file() {
   local file="$1"

@@ -347,8 +347,9 @@ func (r *OfflineDeliveryRunner) importAndActivate(ctx context.Context, raw strin
 	return r.activateApplications(ctx, imported.State.Current.Applications, verify)
 }
 
-// activateApplications 是唯一的激活流水线：先整集合校验受控路由，再逐应用
-// 确保受控部署 READY、发起激活并等待组件自然 ACK，最后复核整个签名集合。
+// activateApplications 用途：沿受控部署与激活流水线等待完整且近期的自然确认。
+// 参数：ctx 为有界执行上下文，signed 为签名应用集合，verify 为可选许可复核。
+// 返回值：全部应用当前确认后返回 ENFORCED，否则返回未完成结果与错误。
 func (r *OfflineDeliveryRunner) activateApplications(ctx context.Context, signed []core.Application, verify offlineActivationVerifier) (OfflineActivationResult, error) {
 	out := OfflineActivationResult{Status: "INCOMPLETE"}
 	applications := offlineDeploymentOrder(signed)
@@ -391,7 +392,7 @@ func (r *OfflineDeliveryRunner) activateApplications(ctx context.Context, signed
 					return out, e
 				}
 				if e == nil {
-					if enforcementComplete(st) {
+					if enforcementConfirmedNow(st) {
 						out.Applications = append(out.Applications, app.Code)
 						break
 					}
@@ -435,7 +436,7 @@ func (r *OfflineDeliveryRunner) activateApplications(ctx context.Context, signed
 			if err != nil {
 				return out, err
 			}
-			if !enforcementComplete(st) {
+			if !enforcementConfirmedNow(st) {
 				complete = false
 			}
 		}
@@ -516,6 +517,22 @@ func (r *OfflineDeliveryRunner) ensureDeployment(ctx context.Context, p authctx.
 		return fmt.Errorf("application %s cannot resume deployment state %s", app, deployment)
 	}
 	return nil
+}
+
+// enforcementConfirmedNow 用途：仅允许近期自然确认的强制执行应用完成激活。
+// 参数：s 为当前应用协调状态。
+// 返回值：完整快照及所有 READY/ACK 均在既有时间窗内时返回 true。
+func enforcementConfirmedNow(s coordination.Status) bool {
+	if !enforcementComplete(s) {
+		return false
+	}
+	now := time.Now().UTC()
+	for _, member := range s.Members {
+		if offlineMemberConfirmation(s.Application.Application, member, now) != nil {
+			return false
+		}
+	}
+	return true
 }
 
 func enforcementComplete(s coordination.Status) bool {

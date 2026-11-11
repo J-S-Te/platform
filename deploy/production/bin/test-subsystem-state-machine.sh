@@ -34,6 +34,14 @@ public_transport_prepare() { :; }
 scope_services() { printf '%s\n' platform-api frontend contract-api data-analysis-api; }
 # 本文件验证阶段切换和刷新顺序；完整运行时镜像、成员和状态校验由 test-subsystem-completion.py 执行。
 verify_selected_runtime() { [[ "$mock_runtime_verified" == true ]]; }
+# 运行配置门禁（runtime/*.env 重复键、生产 worker 标志）由 tests/test-runtime-env-hygiene.py
+# 独立覆盖；这里只验证它被接在“删候选、进 VERIFIED”之前，并且失败时失败关闭。
+runtime_env_hygiene_gate_calls="$test_root/runtime-env-gate-calls"
+mock_runtime_env_gate=0
+runtime_env_hygiene_gate() {
+  printf '%s\n' "$*" >> "$runtime_env_hygiene_gate_calls"
+  return "$mock_runtime_env_gate"
+}
 # 许可运行态门禁的四项检查（容器健康/许可状态卷/许可实例/受控部署核验）由
 # tests/test-license-runtime.py 独立覆盖；这里只验证它被接在“删候选、进 VERIFIED”之前，
 # 并且失败时失败关闭（不删候选、不进入 VERIFIED）。
@@ -229,6 +237,19 @@ fi
 [[ -e "$mock_candidate_marker" && "$mock_removed" == false ]]
 mock_runtime_verified=true
 assert_phase READY_TO_CONTINUE
+# 运行配置门禁失败同样必须失败关闭：保留候选、不进入 VERIFIED（坏配置不能记成部署完成）。
+mock_runtime_env_gate=1
+if continue_subsystem contract > "$test_root/runtime-env-gate-fail.out" 2>&1; then
+  echo '运行配置门禁失败仍被判定为部署完成' >&2; exit 1
+fi
+[[ -e "$mock_candidate_marker" && "$mock_removed" == false ]] || {
+  echo '运行配置门禁失败后候选容器被删除' >&2; exit 1
+}
+assert_phase READY_TO_CONTINUE
+grep -q '先修配置再发布' "$test_root/runtime-env-gate-fail.out" || {
+  echo '运行配置门禁失败缺少先修配置再发布的指引' >&2; exit 1
+}
+mock_runtime_env_gate=0
 # 门禁失败必须失败关闭：保留候选、不进入 VERIFIED（否则重启循环的容器会被记成部署完成）。
 mock_license_gate=1
 if continue_subsystem contract > "$test_root/license-gate-fail.out" 2>&1; then
@@ -245,6 +266,9 @@ mock_license_gate=0
 continue_subsystem contract > "$test_root/continue.out"
 grep -qx 'contract_management' "$license_runtime_gate_calls" || {
   echo 'continue 未按应用编码执行许可运行态门禁' >&2; exit 1
+}
+[[ -s "$runtime_env_hygiene_gate_calls" ]] || {
+  echo 'continue 未在进入 VERIFIED 前执行运行配置门禁' >&2; exit 1
 }
 [[ ! -e "$mock_candidate_marker" && "$mock_removed" == true ]]
 grep -q 'VERIFIED' "$test_root/continue.out"

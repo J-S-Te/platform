@@ -28,6 +28,9 @@ deploy_component() { printf 'deploy:%s\n' "$1" >> "$events"; }
 verify() { printf 'verify\n' >> "$events"; }
 wait_for_required_service_health() { printf 'verify\n' >> "$events"; }
 fail() { echo "FAIL: $*" >&2; exit 1; }
+# sha256_of 计算测试文件的内容摘要。
+# 参数：第一个参数为夹具文件路径。
+# 返回值：输出SHA256摘要，读取失败时返回非零。
 sha256_of() {
   if command -v sha256sum >/dev/null 2>&1; then
     sha256sum -- "$1" | awk '{print $1}'
@@ -35,7 +38,9 @@ sha256_of() {
     shasum -a 256 -- "$1" | awk '{print $1}'
   fi
 }
-# 目标部署入口在 Linux 上使用 GNU stat -c；本机可能是 macOS，因此按可用性回退。
+# file_mode 兼容Linux及macOS读取测试恢复件权限。
+# 参数：第一个参数为待核验文件路径。
+# 返回值：输出八进制权限；读取失败返回非零。
 file_mode() {
   local mode
   if mode="$(stat -c '%a' -- "$1" 2>/dev/null)" && [[ "$mode" =~ ^[0-7]{3,4}$ ]]; then

@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"github.com/J-S-Te/Basic-Platform/internal/platform/license/domain"
 	core "github.com/J-S-Te/license-core"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -56,6 +58,7 @@ func NewService(repo Repository, trusted map[string]ed25519.PublicKey, now func(
 	}
 	return &Service{repo: repo, trusted: keys, now: now}, nil
 }
+
 // Initialize 创建部署记录：首次调用生成随机 InstanceID；重复调用校验客户与环境
 // 绑定一致后返回现状，绑定不一致返回 ErrBindingMismatch。
 func (s *Service) Initialize(ctx context.Context, in InitializeInput, actor domain.Actor) (domain.State, error) {
@@ -185,6 +188,7 @@ func (s *Service) activate(tx Transaction, st domain.State, now time.Time) (doma
 	}
 	return s.state(tx)
 }
+
 // Read 校验并返回当前状态，同时提交时钟观测、按需激活挂起包；
 // 检测到时钟回拨时返回 ErrClock，状态保持失败关闭。
 func (s *Service) Read(ctx context.Context) (domain.State, error) {
@@ -267,14 +271,17 @@ func (s *Service) preview(tx Transaction, raw string) (domain.Preview, error) {
 	out.RequiresChangeConfirmation = len(out.Changes) > 0
 	return out, nil
 }
+
 // Preview 验签并解析拟导入许可证与当前状态的差异，不落库；版本必须严格递增。
 func (s *Service) Preview(ctx context.Context, raw string) (domain.Preview, error) {
 	var out domain.Preview
 	err := s.repo.Lock(ctx, func(tx Transaction) error { var e error; out, e = s.preview(tx, raw); return e })
 	return out, err
 }
-// Commit 以双阶段确认完成导入：期望值任一不匹配即冲突，Preview 要求的确认开关
-// 缺失即拒绝；时钟闩锁生效时拒绝写入。
+
+// Commit 以双阶段确认完成导入：期望值任一不匹配即返回逐字段的 ExpectationError
+// （确定性失败，必须重新预览核对），Preview 要求的确认开关缺失即拒绝；
+// 时钟闩锁生效时拒绝写入。
 func (s *Service) Commit(ctx context.Context, in CommitInput, actor domain.Actor) (domain.State, error) {
 	var out domain.State
 	if !validActor(actor) {
@@ -286,8 +293,8 @@ func (s *Service) Commit(ctx context.Context, in CommitInput, actor domain.Actor
 		if e != nil {
 			return e
 		}
-		if p.Digest != in.Digest || p.Revision != in.ExpectedRevision || p.CurrentVersion != in.ExpectedCurrentVersion || p.PendingDigest != in.ExpectedPendingDigest {
-			return domain.ErrConflict
+		if diffs := commitExpectationDiffs(p, in); len(diffs) > 0 {
+			return domain.NewExpectationError(diffs)
 		}
 		if (p.RequiresChangeConfirmation && !in.ConfirmChanges) || (p.RequiresPendingReplacement && !in.ConfirmReplacePending) {
 			return domain.ErrConfirmation
@@ -328,6 +335,42 @@ func (s *Service) Commit(ctx context.Context, in CommitInput, actor domain.Actor
 	}
 	return out, err
 }
+
+// commitDigestShape 只接受小写 64 位十六进制摘要；形状不符的客户端输入一律不复述，
+// 避免把任意超长字符串写进错误响应。
+var commitDigestShape = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+// commitExpectationDiffs 逐项比较提交携带的期望值与本次预览结果，顺序固定为
+// digest → revision → current_version → pending_digest，让运维直接看到哪个字段不一致。
+// 期望值不匹配属确定性失败：调用方没有随状态推进更新期望值，重试同一请求不会成功。
+func commitExpectationDiffs(p domain.Preview, in CommitInput) []domain.ExpectationDiff {
+	var diffs []domain.ExpectationDiff
+	if p.Digest != in.Digest {
+		diffs = append(diffs, domain.ExpectationDiff{Field: "digest", Expected: commitDigestValue(in.Digest), Actual: commitDigestValue(p.Digest)})
+	}
+	if p.Revision != in.ExpectedRevision {
+		diffs = append(diffs, domain.ExpectationDiff{Field: "revision", Expected: strconv.FormatUint(in.ExpectedRevision, 10), Actual: strconv.FormatUint(p.Revision, 10)})
+	}
+	if p.CurrentVersion != in.ExpectedCurrentVersion {
+		diffs = append(diffs, domain.ExpectationDiff{Field: "current_version", Expected: strconv.FormatUint(in.ExpectedCurrentVersion, 10), Actual: strconv.FormatUint(p.CurrentVersion, 10)})
+	}
+	if p.PendingDigest != in.ExpectedPendingDigest {
+		diffs = append(diffs, domain.ExpectationDiff{Field: "pending_digest", Expected: commitDigestValue(in.ExpectedPendingDigest), Actual: commitDigestValue(p.PendingDigest)})
+	}
+	return diffs
+}
+
+// commitDigestValue 只在摘要形状合法时回显；空值表示没有值，其余落成固定文案。
+func commitDigestValue(value string) string {
+	if value == "" {
+		return "（无）"
+	}
+	if commitDigestShape.MatchString(value) {
+		return value
+	}
+	return "无效摘要"
+}
+
 // Events 分页返回授权事件审计流；分页参数越界直接拒绝。
 func (s *Service) Events(ctx context.Context, page, size int) (domain.EventPage, error) {
 	if page < 1 || size < 1 || size > 100 || page > 1000000 {
@@ -335,6 +378,7 @@ func (s *Service) Events(ctx context.Context, page, size int) (domain.EventPage,
 	}
 	return s.repo.Events(ctx, page, size)
 }
+
 // RestoreClock 校验一次性签名恢复凭证后解除时钟闩锁，并把最高观测时间推进到锚点。
 // 凭证只能消费一次，过期或回拨窗口不匹配即拒绝。
 func (s *Service) RestoreClock(ctx context.Context, raw string, actor domain.Actor) (domain.State, error) {

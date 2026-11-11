@@ -53,10 +53,16 @@ runtime:
         OIDC_SESSION_COOKIE_NAME: contract_management_session
         OIDC_SESSION_IDLE_TTL: 30m
         OIDC_SESSION_ABSOLUTE_TTL: 8h
+        # 中央会话只读缓存显式关闭（0=关闭；开启后平台撤销/登出的本地生效延迟≤该毫秒值，上限 5000）。
+        CENTRAL_SESSION_CACHE_MS: "0"
         PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED: "true"
         PLATFORM_APPLICATION_CODE: contract_management
         PLATFORM_ENVIRONMENT_CODE: prod
         PLATFORM_AUDIT_REQUIRED: "true"
+        # 审计清理已启用：保留 60 天（已批准，2026-11-07 决策）。删除对象是仅保存在本地的
+        # 已投递审计证据，平台侧另有副本；保留期不得低于审计要求，变更需重新审批
+        # （见对应子系统模板注释）。
+        AUDIT_OUTBOX_DELIVERED_RETENTION_DAYS: "60"
         CONTRACT_MACHINE_TOKEN_ISSUER: basic-platform
         CONTRACT_MACHINE_TOKEN_AUDIENCE: basic-platform-application
         CONTRACT_MACHINE_TOKEN_PUBLIC_KEY_PATH: /app/data/keys/jwt-ed25519-public.pem

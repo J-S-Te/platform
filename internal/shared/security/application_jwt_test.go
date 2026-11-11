@@ -12,8 +12,9 @@ import (
 	"time"
 )
 
-// writeApplicationJWTKeyPair 把给定的公钥和私钥写成 PKCS#8 / PKIX PEM，供加载自检用例
-// 组合出“匹配”和“不匹配”的配置。公钥与私钥可以来自不同密钥对，用来模拟配置错误。
+// writeApplicationJWTKeyPair 在临时目录中写入签名密钥夹具。
+// 参数：t为测试上下文，public/private可来自相同或不同密钥对。
+// 返回值：私钥和公钥的临时文件路径；写入失败时终止测试。
 func writeApplicationJWTKeyPair(t *testing.T, public ed25519.PublicKey, private ed25519.PrivateKey) (string, string) {
 	t.Helper()
 	privateDER, err := x509.MarshalPKCS8PrivateKey(private)
@@ -36,8 +37,9 @@ func writeApplicationJWTKeyPair(t *testing.T, public ed25519.PublicKey, private 
 	return privatePath, publicPath
 }
 
-// 私钥派生公钥与配置公钥不配对时，签发实例签出的机器 Token 没有任何验证方能够接受；
-// 这种配置错误必须在加载阶段失败，并指出是应用 JWT 的密钥不匹配。
+// TestLoadApplicationJWTManagerRejectsMismatchedKeyPair 验证错配密钥在启动加载时被拒绝。
+// 参数：t为测试上下文。
+// 返回值：无；加载未失败或错误无法定位密钥错配时失败。
 func TestLoadApplicationJWTManagerRejectsMismatchedKeyPair(t *testing.T) {
 	_, signingPrivate, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -60,7 +62,9 @@ func TestLoadApplicationJWTManagerRejectsMismatchedKeyPair(t *testing.T) {
 	}
 }
 
-// 自检不得破坏正常路径：配对密钥应能加载，签发与验证仍自洽，独立验证方只加载公钥也可用。
+// TestLoadApplicationJWTManagerAcceptsMatchingKeyPair 验证配对密钥支持签发及独立验签。
+// 参数：t为测试上下文。
+// 返回值：无；加载、签发或任一验证路径异常时失败。
 func TestLoadApplicationJWTManagerAcceptsMatchingKeyPair(t *testing.T) {
 	public, private, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {

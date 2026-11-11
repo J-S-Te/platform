@@ -80,6 +80,14 @@ jobs:
           docker exec '${{ job.services.logout-mysql.id }}' mysql -uroot -e \
             "CREATE DATABASE platform_oidc_test_idle CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
           go test ./internal/platform/oidc/infrastructure -run '^TestResolveSessionSubject(Idle|CentralIdle)PolicyMySQL$' -count=1 -v
+      - name: Verify owner directory Chinese search on isolated MySQL
+        env:
+          PLATFORM_OWNER_DIRECTORY_TEST_DSN: root@tcp(127.0.0.1:${{ job.services.logout-mysql.ports[3306] }})/owner_directory_test?parseTime=true&charset=utf8mb4&collation=utf8mb4_0900_ai_ci
+        run: |
+          set -euo pipefail
+          docker exec '${{ job.services.logout-mysql.id }}' mysql -uroot -e \
+            "CREATE DATABASE owner_directory_test CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;"
+          go test ./internal/platform/ownerdirectory/infrastructure -run '^TestOwnerDirectoryKeywordMySQL$' -count=1 -v
       - name: Verify Agent credential ownership under isolated root execution
         shell: bash
         run: |
@@ -118,6 +126,7 @@ jobs:
           python3 -B scripts/test_unlock_locked_account.py
           python3 -B scripts/test_subsystem_lifecycle.py
           python3 -B scripts/test_subsystem_connect_origin.py
+          python3 -B scripts/test_reimbursement_infrastructure.py
           # 本地开发/运维入口（local-status / docker-local / 系统编排）的回归：全部用
           # 临时工作区与 PATH 桩，不接触真实 Docker/MySQL/网络，也不读写运行状态文件。
           # 每个用例都加 timeout，避免个别场景在 runner 上长时间挂起卡住 test job。
@@ -149,11 +158,21 @@ jobs:
           python3 -B deploy/production/tests/test_temporal_shared_boundary.py
           python3 -B deploy/production/tests/test_deploy_service_backup_names.py
           bash deploy/production/tests/test_truncate_container_logs.sh
+          bash deploy/production/tests/test_prune_images.sh
+          bash deploy/production/tests/test-deploy-backup-access.sh
           python3 -B deploy/production/tests/test_license_status_reading.py
+          # 运行配置门禁：runtime/*.env 重复键（provisioner 报 validate runtime environment
+          # group）与编排里 PROJECT_RUN_WORKER_WITH_API 非 false（生产校验拒绝）的回归。
+          python3 deploy/production/tests/test-runtime-env-hygiene.py
           python3 deploy/production/tests/test-ci-assets-sync.py
           python3 deploy/production/tests/test-deploy-service-preflight.py
+          python3 -B deploy/production/tests/test-contract-runtime-rollout.py
+          python3 -B deploy/production/tests/test-portal-migration-maintenance.py
           python3 -B deploy/production/tests/test-deploy-service-env-set.py
           python3 -B deploy/production/tests/test-portal-proxy-deployment.py
+          # 监控挂载定向补齐：历史活动编排只挂 2 个规则文件 + 缺凭据目录时，
+          # prometheus 静默 fail-open（规则少一半）且 platform-api job 永远缺凭据。
+          python3 -B deploy/production/tests/test-prometheus-mounts-install.py
           python3 -B deploy/production/tests/test-release-backup-policy.py
           python3 deploy/production/tests/test-runtime-dsn-dotenv.py
           python3 -B deploy/production/tests/test-upgrade-config-preservation.py
@@ -202,6 +221,25 @@ jobs:
             echo "unresolved merge conflict marker found in production deployment assets" >&2
             exit 1
           fi
+      - name: Verify offline recovery and versioned root tools
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          (cd tools/offline-delivery && sha256sum --strict --check SHA256SUMS)
+          engineering_root="$(mktemp -d "$RUNNER_TEMP/offline-engineering.XXXXXX")"
+          trap 'rm -rf -- "$engineering_root"' EXIT
+          cp -R tools/offline-delivery/engineering-root/. "$engineering_root/"
+          ln -s "$GITHUB_WORKSPACE" "$engineering_root/platform"
+          export UIP_ENGINEERING_ROOT="$engineering_root"
+          while IFS= read -r -d '' script; do bash -n "$script"; done \
+            < <(find tools/offline-delivery/engineering-root -type f -name '*.sh' -print0)
+          python3 -B deploy/production/tests/test-release-image-prune.py
+          python3 -B deploy/production/tests/test-workflow-import-diagnostics.py
+          python3 -B deploy/production/tests/test-oneclick-media-compatibility.py
+          python3 -B deploy/production/tests/test-oneclick-archive-metadata.py
+          python3 -B deploy/production/tests/test-oneclick-upgrade-safety.py
+          sudo -n env UIP_ENGINEERING_ROOT="$engineering_root" \
+            python3 -B deploy/production/tests/test-oneclick-upgrade-preflight.py
       # license-core 在三处（consumer 快照、权威源、vendor）各有一份副本，重复副本的
       # 漂移此前只能靠人工比对发现；这里把副本门禁与其自测一起纳入 CI。
       - name: Verify license-core mirror stays in sync

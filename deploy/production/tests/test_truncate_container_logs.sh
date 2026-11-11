@@ -13,12 +13,12 @@ printf 'y%.0s' {1..1024} >"$WORK/containers/bbb/bbb-json.log"
 
 out="$(DOCKER_ROOT="$WORK" bash "$SCRIPT" 2>&1)" || true
 check "dry-run reports logs" "grep -q 'aaa-json.log' <<<\"\$out\""
-check "dry-run does not truncate" "[[ \$(stat -f%z \"$WORK/containers/aaa/aaa-json.log\") -eq 2048 ]]"
+check "dry-run does not truncate" "[[ \$(wc -c < \"$WORK/containers/aaa/aaa-json.log\" | tr -d \" \") -eq 2048 ]]"
 check "dry-run message" "grep -q 'dry-run: nothing was truncated' <<<\"\$out\""
 
 out="$(DOCKER_ROOT="$WORK" bash "$SCRIPT" --apply 2>&1)" || true
-check "apply truncates logs" "[[ \$(stat -f%z \"$WORK/containers/aaa/aaa-json.log\") -eq 0 ]]"
-check "apply truncates second log" "[[ \$(stat -f%z \"$WORK/containers/bbb/bbb-json.log\") -eq 0 ]]"
+check "apply truncates logs" "[[ \$(wc -c < \"$WORK/containers/aaa/aaa-json.log\" | tr -d \" \") -eq 0 ]]"
+check "apply truncates second log" "[[ \$(wc -c < \"$WORK/containers/bbb/bbb-json.log\" | tr -d \" \") -eq 0 ]]"
 check "apply message" "grep -q 'applied: truncated container logs' <<<\"\$out\""
 
 check "missing root fails" "! DOCKER_ROOT=\"$WORK/none\" bash \"$SCRIPT\" >/dev/null 2>&1"

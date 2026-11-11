@@ -1,0 +1,73 @@
+name: contract-auto-approve-enable
+
+# 一次性运维入口：把测试机合同运行环境的自动审批能力开关打开并重启 contract-api/worker。
+# 默认 dry-run：只显示当前值与文件路径；显式取消勾选才会备份、改 env、重启。
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: '仅检查（保持勾选）；取消勾选才会修改 contract.env 并重启'
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: contract-auto-approve-enable
+  cancel-in-progress: false
+
+jobs:
+  enable:
+    runs-on: ubuntu-latest
+    environment: test
+    steps:
+      - uses: actions/checkout@v4
+      - name: Enable capability on the deploy host
+        shell: bash
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -Eeuo pipefail
+          : "${DEPLOY_HOST:?missing DEPLOY_HOST}"
+          : "${DEPLOY_USER:?missing DEPLOY_USER}"
+          : "${DEPLOY_SSH_KEY:?missing DEPLOY_SSH_KEY}"
+          : "${DEPLOY_KNOWN_HOSTS:?missing DEPLOY_KNOWN_HOSTS}"
+          DEPLOY_PORT="${DEPLOY_PORT:-22}"
+          install -m 700 -d "$HOME/.ssh"
+          printf '%s\n' "$DEPLOY_SSH_KEY" > "$HOME/.ssh/id_ed25519"
+          chmod 600 "$HOME/.ssh/id_ed25519"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          echo "== contract auto-approve enable mode: dry_run=$DRY_RUN =="
+          ssh -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" 'DRY_RUN='"$DRY_RUN"' bash -s' <<'REMOTE'
+          set -Eeuo pipefail
+          ENV_FILE=""
+          for f in /opt/basic-platform/runtime/contract.env /opt/unified-identity-platform/runtime/contract.env; do
+            if [ -f "$f" ]; then ENV_FILE="$f"; break; fi
+          done
+          [ -n "$ENV_FILE" ] || { echo "contract.env not found" >&2; exit 1; }
+          echo "env_file=$ENV_FILE"
+          echo "current: $(grep -E '^CONTRACT_IMPORT_AUTO_APPROVE_HISTORICAL=' "$ENV_FILE" || echo '<missing>')"
+          if [ "$DRY_RUN" = "true" ]; then echo "dry-run: no changes"; exit 0; fi
+          backup="$ENV_FILE.bak.$(date -u +%Y%m%dT%H%M%SZ)"
+          cp -a "$ENV_FILE" "$backup"
+          if grep -q '^CONTRACT_IMPORT_AUTO_APPROVE_HISTORICAL=' "$ENV_FILE"; then
+            sed -i 's/^CONTRACT_IMPORT_AUTO_APPROVE_HISTORICAL=.*/CONTRACT_IMPORT_AUTO_APPROVE_HISTORICAL=true/' "$ENV_FILE"
+          else
+            printf '\nCONTRACT_IMPORT_AUTO_APPROVE_HISTORICAL=true\n' >> "$ENV_FILE"
+          fi
+          echo "after: $(grep -E '^CONTRACT_IMPORT_AUTO_APPROVE_HISTORICAL=' "$ENV_FILE")"
+          echo "backup=$backup"
+          mapfile -t containers < <(docker ps --format '{{.Names}}' | grep -E 'contract-(api|worker)' || true)
+          if [ "${#containers[@]}" -eq 0 ]; then echo "contract containers not found" >&2; exit 1; fi
+          printf 'restart: %s\n' "${containers[@]}"
+          docker restart "${containers[@]}"
+          sleep 5
+          docker ps --format '{{.Names}} {{.Status}}' | grep -E 'contract-(api|worker)' || true
+          REMOTE

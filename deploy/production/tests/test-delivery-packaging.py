@@ -214,6 +214,9 @@ class DeliveryPackaging(unittest.TestCase):
     def manifest(self):
         return {name: digest for digest, name in (line.split(None, 1) for line in (self.output / "SHA256SUMS").read_text().splitlines())}
 
+    # 用途：验证实际打包器交付当前辅助工具、资产和固定版本根。
+    # 参数：无。
+    # 返回值：无；目录与归档的内容或摘要不符时失败。
     def test_full_root_build_ships_checked_helpers_and_identical_dir_tar_identity(self):
         result = self.build()
         self.assertIn("统一交付检查", result.stdout)
@@ -234,7 +237,8 @@ class DeliveryPackaging(unittest.TestCase):
         with tarfile.open(asset) as archive:
             names = {member.name.removeprefix("./"): member for member in archive if member.isfile()}
             for name in ("bin/deployment-workflow.sh", "bin/deployment-session.py", "bin/delivery-runtime.py",
-                         "bin/delivery-runtime.sh", "bin/subsystem-runtime.py", "bin/delivery-inspect-v2.py", "DELIVERY_WORKFLOW.md"):
+                         "bin/delivery-runtime.sh", "bin/subsystem-runtime.py", "bin/delivery-inspect-v2.py",
+                         "bin/release-image-prune.py", "DELIVERY_WORKFLOW.md"):
                 self.assertIn(name, names)
                 self.assertEqual(archive.extractfile(names[name]).read(), (self.production / name).read_bytes())
         digest, name = Path(str(self.archive) + ".sha256").read_text().split()
@@ -242,7 +246,7 @@ class DeliveryPackaging(unittest.TestCase):
         self.assertEqual(digest, hashlib.sha256(self.archive.read_bytes()).hexdigest())
         with tarfile.open(self.archive) as archive:
             files = {member.name for member in archive if member.isfile()}
-            self.assertEqual(files, {self.output.name + "/" + name for name in expected} | {self.output.name + "/SHA256SUMS"})
+            self.assertEqual(files, {VERSION + "/" + name for name in expected} | {VERSION + "/SHA256SUMS"})
         checker_calls = [json.loads(line) for line in self.python_log.read_text().splitlines() if "delivery-inspect.py" in line]
         self.assertEqual(len(checker_calls), 1)
         self.assertEqual(checker_calls[0][0], str(self.production / "bin/delivery-inspect.py"))
@@ -287,6 +291,9 @@ class DeliveryPackaging(unittest.TestCase):
         self.assertFalse((self.output / ("platform-backend-" + VERSION + "-linux-amd64.tar.gz")).exists())
         self.assertTrue((self.output / "BUILD_INFO.txt").is_file())
 
+    # 用途：验证增装保留原介质并以固定版本目录归档当前清理工具。
+    # 参数：self为隔离交付夹具，不访问真实Docker或业务数据。
+    # 返回值：无；原介质被修改、归档根漂移或工具未重新绑定时失败。
     def test_extension_accepts_baseline_with_reset_tool_and_rebinds_current_tool(self):
         self.build()
         baseline = self.output
@@ -308,7 +315,9 @@ class DeliveryPackaging(unittest.TestCase):
             self.assertEqual((baseline/name).read_bytes(),raw,'baseline changed: '+name)
         archive_path = self.root/('uip-offline-delivery-'+version+'-linux-amd64.tar')
         with tarfile.open(archive_path) as archive:
-            self.assertEqual(archive.extractfile('extension/清理首次部署产物.sh').read(),
+            roots = {member.name.split('/', 1)[0] for member in archive}
+            self.assertEqual(roots, {version})
+            self.assertEqual(archive.extractfile(version + '/清理首次部署产物.sh').read(),
                              (output/'清理首次部署产物.sh').read_bytes())
         checked = self.command([sys.executable,str(self.production/'bin/delivery-inspect.py'),
                                 '--media',str(output),'--phase','prepare','--format','json'])

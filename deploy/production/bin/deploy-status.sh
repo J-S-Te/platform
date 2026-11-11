@@ -154,6 +154,15 @@ continue_subsystem() {
     exec 7>&-
     return 1
   }
+  # 运行配置门禁：重复键与生产 worker 标志是静态配置缺陷（provisioner 会报
+  # validate runtime environment group / 生产校验会拒绝 true），写入配置后、宣布 VERIFIED
+  # 之前先拦住；失败同样保留候选容器，不把坏配置记成部署完成。
+  runtime_env_hygiene_gate || {
+    printf '错误：运行配置门禁未通过（先修配置再发布）；已保留候选容器，未进入 VERIFIED。\n' >&2
+    flock -u 7
+    exec 7>&-
+    return 1
+  }
   # 许可运行态门禁：删除候选容器就等于宣布“部署完成”，因此必须在删除之前确认 API 容器
   # 真的带上了许可状态卷、且许可实例与平台一致——缺卷的容器会健康检查失败并每分钟重启，
   # 而平台只会显示「部署 Agent 执行失败」。失败时保留候选，避免把不可用运行态记成 VERIFIED。

@@ -44,6 +44,15 @@ docker() {
   fi
 }
 sleep() { SECONDS=$((SECONDS + ${1:-1})); }
+# 运行配置门禁（runtime/*.env 重复键、生产 worker 标志）由 tests/test-runtime-env-hygiene.py
+# 独立覆盖；本文件聚焦 verify() 的健康与公网 issuer 语义，因此给出一个记录调用的通过替身，
+# 并断言 verify() 在给出成功结论前确实执行了它、且失败时失败关闭。
+runtime_env_hygiene_gate_calls="$test_root/runtime-env-gate-calls"
+mock_runtime_env_gate=0
+runtime_env_hygiene_gate() {
+  printf 'call:%s\n' "${*:+$*}" >> "$runtime_env_hygiene_gate_calls"
+  return "$mock_runtime_env_gate"
+}
 # 许可运行态门禁（容器健康/许可状态卷/许可实例/受控部署核验）由 tests/test-license-runtime.py
 # 独立覆盖；本文件聚焦 verify() 的健康与公网 issuer 语义，因此给出一个记录调用的通过替身，
 # 并断言 verify() 在给出成功结论前确实执行了它。
@@ -679,6 +688,17 @@ grep -Fq 'tenant realm 尚未创建' "$test_root/verify-keycloak-404.log" ||
   fail 'tenant realm 404 告警文案缺失'
 grep -q . "$license_runtime_gate_calls" 2>/dev/null ||
   fail 'verify 未在给出成功结论前执行许可运行态门禁'
+grep -q . "$runtime_env_hygiene_gate_calls" 2>/dev/null ||
+  fail 'verify 未在给出成功结论前执行运行配置门禁'
+# 运行配置门禁失败必须失败关闭，不能继续执行许可门禁或打印成功结论。
+license_calls_before="$(wc -l < "$license_runtime_gate_calls")"
+mock_runtime_env_gate=1
+if (verify) >"$test_root/verify-runtime-env-fail.log" 2>&1; then
+  fail '运行配置门禁失败仍被判定为验收通过'
+fi
+[[ "$(wc -l < "$license_runtime_gate_calls")" == "$license_calls_before" ]] ||
+  fail '运行配置门禁失败后仍继续执行许可运行态门禁'
+mock_runtime_env_gate=0
 keycloak_public_code=503
 if (verify) >"$test_root/verify-keycloak-503.log" 2>&1; then
   fail 'keycloak 公网 5xx 必须阻断 verify'

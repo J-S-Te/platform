@@ -14,7 +14,12 @@ usage() {
   exit 2
 }
 
-service="$1"
+if [[ $# -eq 1 && "$1" == --capabilities ]]; then
+  printf '%s\n' REIMBURSEMENT_PREPARE_ONLY_V1
+  exit 0
+fi
+
+service="${1:-}"
 if [[ "$service" == "data-analysis" ]]; then
   [[ $# -eq 5 ]] || usage
   data_analysis_dashboard_image="$2"
@@ -50,6 +55,37 @@ case "$service" in
     ;;
   *) usage ;;
 esac
+
+# validate_prepare_only 限定暂存开关只能用于报销且必须是明确布尔值。
+# 参数：暂存开关值及本次发布的受控服务标识。
+# 返回值：合法时零；非法值或其他服务启用时返回二。
+validate_prepare_only() {
+  case "$1" in
+    false) return 0 ;;
+    true) [[ "$2" == reimbursement ]] && return 0 ;;
+  esac
+  echo 'DEPLOY_PREPARE_ONLY 必须为 true/false，且仅报销支持 true' >&2
+  return 2
+}
+prepare_only="${DEPLOY_PREPARE_ONLY-false}"
+validate_prepare_only "$prepare_only" "$service" || exit 2
+
+# prepare_reimbursement_infrastructure 在已有备份和发布锁内准备首次安装基础设施。
+# 参数：无；使用已验证的部署目录和继承的发布锁描述符九。
+# 返回值：受控助手成功时零；缺失、版本不符或事务失败时非零。
+prepare_reimbursement_infrastructure() {
+  local helper="$script_dir/prepare-reimbursement-infrastructure.py" capability
+  [[ -f "$helper" && ! -L "$helper" ]] || {
+    echo '缺少报销基础设施准备助手，拒绝暂存' >&2
+    return 1
+  }
+  capability="$(python3 -B "$helper" --capabilities 2>/dev/null)" || return 1
+  [[ "$capability" == REIMBURSEMENT_INFRASTRUCTURE_PREPARE_V1 ]] || {
+    echo '报销基础设施准备助手版本不匹配，拒绝暂存' >&2
+    return 1
+  }
+  python3 -B "$helper" --deploy-root "$deploy_dir" --deployment-lock-fd 9
+}
 
 acr_enterprise_or_new_personal='^[a-z0-9.-]+\.cr\.aliyuncs\.com/[a-z0-9._/-]+@sha256:[a-f0-9]{64}$'
 acr_legacy_personal='^registry(-vpc)?\.[a-z0-9-]+\.aliyuncs\.com/[a-z0-9._/-]+@sha256:[a-f0-9]{64}$'
@@ -345,12 +381,42 @@ write_service_runtime_dsns() {
   write_runtime_dsn_value "$target" "$key" "$dsn"
 }
 
+# require_backup_tree_accessible 在发布前确认备份目录对当前部署用户可读可遍历。
+#
+# 背景（2026-11-07 事故）：backups/file-gateway 属主漂移到 root 后，发布前的完整备份
+# 在 find 阶段报 "Permission denied" 并被 fail-closed 拒绝；错误发生在备份中途，
+# 提示不明确、白跑一轮发布。这里在用锁和做备份之前先自检，给出可执行的修复命令。
+require_backup_tree_accessible() {
+  local traversal_errors unreadable
+  [[ -d "$deploy_dir/backups" ]] || return 0
+  # 遍历错误（无权限/IO）与不可读项分开收集：两者都可能让完整备份中途失败。
+  # 刻意不用 GNU find 的 -readable/-executable：CI 与本机都可能有 BSD find，
+  # 用可移植的 shell 测试逐个判断更稳。
+  traversal_errors="$(find "$deploy_dir/backups" -maxdepth 2 -print 2>&1 >/dev/null || true)"
+  unreadable=""
+  while IFS= read -r entry; do
+    [[ -n "$entry" ]] || continue
+    # 只检查目录：完整备份需要遍历目录树，目录不可读/不可遍历才会中途失败；
+    # 历史遗留的 600 文件（如 *-onboarding-*.sql.backup）不属于发布必读内容，
+    # 不能因为它们把整个发布拦下（2026-11-07 回归）。
+    [[ -d "$entry" ]] || continue
+    [[ -r "$entry" && -x "$entry" ]] || unreadable+="$entry"$'\n'
+  done < <(find "$deploy_dir/backups" -maxdepth 2 -type d -print 2>/dev/null || true)
+  if [[ -n "$traversal_errors" || -n "$unreadable" ]]; then
+    echo '发布前检查失败：备份目录存在当前部署用户无法读取/遍历的项，完整备份会中途失败：' >&2
+    { printf '%s\n%s\n' "$unreadable" "$traversal_errors"; } | sed '/^$/d' | head -8 >&2
+    echo "修复：以 root 把属主/权限归还部署用户，例如 chown -R $(id -u):$(id -g) '$deploy_dir/backups' && chmod -R u+rwX '$deploy_dir/backups'；保持 600/700 语义，勿用 777。" >&2
+    return 1
+  fi
+}
+
 install -d -m 700 "$deploy_dir/runtime"
 mkdir -p "$deploy_dir/backups/releases"
 [[ -w "$deploy_dir/backups/releases" ]] || {
   echo "发布备份目录不可写：$deploy_dir/backups/releases；请将其属主调整为当前 CI 部署用户" >&2
   exit 1
 }
+require_backup_tree_accessible || exit 1
 exec 9>"$deploy_dir/runtime/.deploy.lock"
 # 锁覆盖“备份—迁移—切镜像—健康检查—回退”完整窗口，防止并发发布互相覆盖 .release.env。
 flock -w 900 9 || {
@@ -372,11 +438,14 @@ if [[ -f "$script_dir/release-backup-policy.py" && ! -L "$script_dir/release-bac
     release_backup_policy=backup
   fi
 fi
-if [[ "$release_backup_policy" == skip ]]; then
+if [[ "$release_backup_policy" == skip && "$prepare_only" != true ]]; then
   echo '[信息] 首次安装尚未完成且平台阶段从未发布，没有可回滚的既有发布；跳过发布前完整备份（平台库迁移前备份仍保留）' >&2
 elif ! bash "$script_dir/backup-all.sh" --if-existing --deployment-lock-fd 9; then
   echo '发布前完整备份失败，未修改运行配置或镜像版本指针；拒绝继续更新' >&2
   exit 1
+fi
+if [[ "$prepare_only" == true ]]; then
+  prepare_reimbursement_infrastructure || exit 1
 fi
 case "$service" in
   contract)
@@ -1754,6 +1823,45 @@ audit_contract_number_registry() {
   return 0
 }
 
+# 用途：在维护窗口中先验证合同后台，再开放 API，避免不同版本混跑。
+# 参数：首项为目标不可变镜像，其余为受控选择的合同运行服务。
+# 返回值：全部组件启动且镜像、健康和稳定性验证通过为零，任一步失败为非零。
+replace_contract_runtime() {
+  local expected_image="$1" runtime_service api_selected=false
+  local -a background_services=()
+  shift
+  (($# > 0)) || return 1
+  for runtime_service in "$@"; do
+    if [[ "$runtime_service" == contract-api ]]; then
+      api_selected=true
+    else
+      background_services+=("$runtime_service")
+    fi
+  done
+  # 先阻断新请求，再按 Compose 的 stop_grace_period 等待旧后台退出。
+  # 保留选中集合，不为单组件发布启动未选择的 Worker 或改动其许可身份。
+  if [[ "$api_selected" == true ]]; then
+    compose stop contract-api || return 1
+  fi
+  if ((${#background_services[@]} > 0)); then
+    compose stop "${background_services[@]}" || return 1
+    compose up -d --force-recreate --no-deps --wait --wait-timeout 120 \
+      "${background_services[@]}" || return 1
+    for runtime_service in "${background_services[@]}"; do
+      verify_service_image compose "$runtime_service" "$expected_image" || return 1
+      verify_service_stable "$runtime_service" || return 1
+    done
+  fi
+  if [[ "$api_selected" == true ]]; then
+    compose up -d --force-recreate --no-deps --wait --wait-timeout 120 contract-api || return 1
+    verify_service_image compose contract-api "$expected_image" || return 1
+    verify_service_stable contract-api || return 1
+  fi
+}
+
+# 用途：在备份和迁移成功后受控发布合同运行组件，并执行只读编号巡检。
+# 参数：无，使用候选镜像、部署范围及合同运行配置。
+# 返回值：运行组件通过健康验证为零，凭据、备份、迁移或发布失败为非零。
 deploy_contract() {
   local selected runtime_service
   local -a runtime_services=()
@@ -1791,7 +1899,7 @@ deploy_contract() {
   backup_database_if_initialized contract-mysql contract_management contract || return
   # 迁移命令由 docker-compose.yml 固定；非零退出会在替换 API 镜像前终止发布。
   compose run --rm --no-deps contract-migrate || return
-  if ! compose up -d --force-recreate --no-deps --wait --wait-timeout 120 "${runtime_services[@]}"; then
+  if ! replace_contract_runtime "$image_ref" "${runtime_services[@]}"; then
     echo "---- 合同运行组件启动失败日志 ----" >&2
     compose logs --no-color --tail 120 "${runtime_services[@]}" >&2 || true
     return 1
@@ -1801,10 +1909,6 @@ deploy_contract() {
     compose logs --no-color --tail 120 contract-api >&2 || true
     return 1
   fi
-  for runtime_service in "${runtime_services[@]}"; do
-    verify_service_image compose "$runtime_service" "$image_ref" || return 1
-    verify_service_stable "$runtime_service" || return 1
-  done
   # 合同编号巡检是非致命现场校验：它恒返回 0，只采集证据并告警，
   # 既不在 || return 链上，也不改变本次发布的成功判定。
   audit_contract_number_registry
@@ -2114,6 +2218,9 @@ PY
   fi
 }
 
+# 用途：使用已恢复的不可变镜像指针重建并核验相应服务运行态。
+# 参数：无，使用服务标识、恢复后的发布配置和受控组件范围。
+# 返回值：恢复核验成功或无可回滚镜像时为零，重建或核验失败为非零。
 rollback_runtime() {
   rollback_skipped=false
   local -a restored_images=()
@@ -2181,11 +2288,7 @@ rollback_runtime() {
         [[ -n "$contract_runtime_service" ]] && restored_contract_services+=("$contract_runtime_service")
       done <<< "$selected_contract_runtime"
       ((${#restored_contract_services[@]} > 0)) || return 1
-      compose up -d --force-recreate --no-deps --wait --wait-timeout 120 "${restored_contract_services[@]}" || return 1
-      for contract_runtime_service in "${restored_contract_services[@]}"; do
-        verify_service_image compose "$contract_runtime_service" "$restored_contract_image" || return 1
-        verify_service_stable "$contract_runtime_service" || return 1
-      done
+      replace_contract_runtime "$restored_contract_image" "${restored_contract_services[@]}" || return 1
       ;;
     project)
       local restored_project_image
@@ -2335,6 +2438,13 @@ fi
 
 # 首次上线时子系统镜像会先于浏览器接入发布。此时 OIDC 与机器凭据尚未生成，不能启动
 # 子系统 API，但必须保留不可变 digest，供生产 Agent 在页面接入时迁移并启动。
+if [[ "$prepare_only" == true ]]; then
+  # 此处仍持有发布锁；镜像已拉取并完成配置校验、控制面刷新。
+  # 无论运行配置是否完整都只保留指针，不能进入业务启动或迁移。
+  rm -f "$previous_release"
+  echo 'PREPARED: 报销不可变镜像已安全暂存；未部署业务、未执行迁移或接入'
+  exit 0
+fi
 if [[ "$service" == "contract" ]] && ! contract_runtime_ready; then
   if [[ "$fail_if_runtime_not_ready" == "true" ]]; then
     mv -f "$previous_release" "$release_file"
@@ -2401,6 +2511,21 @@ deploy_function="deploy_${service//-/_}"
 if "$deploy_function"; then
   rm -f "$previous_release" "$deploy_dir/runtime/recovery-status.json" 2>/dev/null || true
   echo "$service 发布成功：$image_ref"
+  # 发布成功后的镜像保留清理：按不可变 digest 反复拉取新镜像会把磁盘撑满
+  # （2026-11-07 测试服务器两次磁盘 100%，发布被 fail-closed 拒绝）。
+  # 默认只清理 72 小时前且未被任何容器使用的镜像，可用 PLATFORM_IMAGE_RETENTION_HOURS 调整；
+  # 0 表示清理所有未使用镜像（会缩短回滚窗口，回滚镜像仍可从 ACR 按 digest 重拉）。
+  # 自动清理与安装持同一长锁：未完成或已放弃的会话一律延后，保护升级中的回退镜像。
+  # 锁覆盖会话检查与整个 prune 子进程，避免检查后有新安装并发启动。
+  # 维护失败只 WARN，不改变发布结论；手工 prune 仍须先停止部署并核对回退材料。
+  image_retention_hours="${PLATFORM_IMAGE_RETENTION_HOURS:-72}"
+  if [[ ! "$image_retention_hours" =~ ^[0-9]+$ ]]; then
+    warn "PLATFORM_IMAGE_RETENTION_HOURS='$image_retention_hours' 不是非负整数，回落默认 72 小时"
+    image_retention_hours=72
+  fi
+  python3 "$script_dir/release-image-prune.py" --deploy-dir "$deploy_dir" \
+    --keep-hours "$image_retention_hours" >&2 || \
+    warn "镜像保留清理失败（不影响发布结论）"
   exit 0
 fi
 

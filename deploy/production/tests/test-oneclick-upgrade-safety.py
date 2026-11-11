@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """离线回归，不访问 Docker、服务器、凭据或数据库。"""
 import pathlib
+import os
 import hashlib
 import subprocess
 import tempfile
 import unittest
 
-ROOT = pathlib.Path(__file__).resolve().parents[4]
+ROOT = pathlib.Path(os.environ.get('UIP_ENGINEERING_ROOT', pathlib.Path(__file__).resolve().parents[4]))
 WRAPPER = (ROOT / "服务器一键离线部署.sh").read_text()
-DEPLOY = (ROOT / "platform/deploy/production/bin/deploy.sh").read_text()
-IMPORT = (ROOT / "platform/deploy/production/bin/deploy-import.sh").read_text()
+DEPLOY = (pathlib.Path(__file__).resolve().parents[1] / "bin/deploy.sh").read_text()
+IMPORT = (pathlib.Path(__file__).resolve().parents[1] / "bin/deploy-import.sh").read_text()
 assert 'source "$script_dir/deploy-import.sh"' in DEPLOY
 
 
@@ -56,6 +57,27 @@ class SafetyRegression(unittest.TestCase):
             self.assertEqual(shell(prefix + 'require_media_sidecar package.tar.gz').returncode, 7)
             companion.symlink_to(payload)
             self.assertEqual(shell(prefix + 'require_media_sidecar package.tar.gz').returncode, 7)
+
+    # 用途：允许未落地首装开启后续会话，同时保留已有部署事实的首装阻断。
+    # 参数：无。
+    # 返回值：无；空目标通过入口检查，已有配置或编排必须拒绝。
+    def test_new_session_install_requires_target_without_deployment_facts(self):
+        marker = 'if [[ "$deployment_mode" == install ]]; then\n  if [[ "$resume_installation"'
+        guard = marker + WRAPPER.split(marker, 1)[1].split(
+            '\ndeclare -a requested_subsystems=', 1)[0]
+        with tempfile.TemporaryDirectory() as tmp:
+            target = pathlib.Path(tmp)
+            prefix = (f'set -Eeuo pipefail; target_dir={tmp!r}; die() {{ exit 7; }}; '
+                      'deployment_mode=install; resume_installation=false; '
+                      'new_installation_session=true; upgrade_subsystems_raw=""; '
+                      'apply_compose=false; license_customer=""; license_file_arg="";\n')
+            result = shell(prefix + guard)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            for name in ('.env', 'docker-compose.yml'):
+                path = target / name
+                path.touch()
+                self.assertEqual(shell(prefix + guard).returncode, 7)
+                path.unlink()
 
     def test_upgrade_publishes_new_parser_before_reload(self):
         upgrade = WRAPPER.split('# 升级模式：已部署环境', 1)[1]

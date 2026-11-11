@@ -102,6 +102,14 @@ UPDATE_CREDENTIAL_SUFFIXES = {
         "contract-approved-reader",
         FILE_GATEWAY_SUFFIX,
     ),
+    "reimbursement": (
+        "project-reference",
+        "project-cost-writer",
+        "owner-directory",
+        "notification-publisher",
+        "audit-publisher",
+        FILE_GATEWAY_SUFFIX,
+    ),
     "settlement": (
         "audit-publisher",
         "notification-publisher",
@@ -162,7 +170,7 @@ SUBSYSTEM_TEMPLATE_PAIRS = (
     ("data_analysis", DATA_ANALYSIS_MANIFEST),
 )
 
-# 模板=清单且必须取预期值的键（参数化对账）。这里同时覆盖两类：
+# 模板=清单且必须取预期值的键（参数化对账）。这里同时覆盖三类：
 # 1. 开关类键：模板关闭而清单开启时，按模板重建会静默停用已交付的接线（文件网关、
 #    负责人目录），因此把它们与清单绑成同一门禁；
 # 2. 受控接入占位键：模板与清单都只写空占位，真实值由受控接入写入（XAPI-13 的
@@ -178,6 +186,20 @@ TEMPLATE_MANIFEST_EXPECTATIONS = (
         DATA_ANALYSIS_TEMPLATE,
         DATA_ANALYSIS_MANIFEST,
     ),
+    # 3. 已审批开启的运维开关：审计已投递行清理（60 天，2026-11-07 决策）与中央会话只读缓存
+    # （仍关闭，0）。清单取值是生产权威、模板是重建入口；两边不同值时，按模板重建会把清理/缓存
+    # 静默改成另一种行为，因此把“当前生产值”绑成同一门禁。改值属于运维审批动作，两处必须同步修改。
+    ("AUDIT_OUTBOX_DELIVERED_RETENTION_DAYS", "60", TEMPLATE, MANIFEST),
+    ("CENTRAL_SESSION_CACHE_MS", "0", TEMPLATE, MANIFEST),
+    ("AUDIT_OUTBOX_DELIVERED_RETENTION_DAYS", "60", CUSTOMER_TEMPLATE, CRM_MANIFEST),
+    ("CENTRAL_SESSION_CACHE_MS", "0", CUSTOMER_TEMPLATE, CRM_MANIFEST),
+    ("AUDIT_OUTBOX_DELIVERED_RETENTION_DAYS", "60", PROJECT_TEMPLATE, PROJECT_MANIFEST),
+    ("CENTRAL_SESSION_CACHE_MS", "0", PROJECT_TEMPLATE, PROJECT_MANIFEST),
+    ("CENTRAL_SESSION_CACHE_MS", "0", SETTLEMENT_TEMPLATE, SETTLEMENT_MANIFEST),
+    ("AUDIT_OUTBOX_DELIVERED_RETENTION_DAYS", "60", DATA_ANALYSIS_TEMPLATE, DATA_ANALYSIS_MANIFEST),
+    ("CENTRAL_SESSION_CACHE_MS", "0", DATA_ANALYSIS_TEMPLATE, DATA_ANALYSIS_MANIFEST),
+    ("AUDIT_OUTBOX_DELIVERED_RETENTION_DAYS", "60", PORTAL_TEMPLATE, PORTAL_MANIFEST),
+    ("CENTRAL_SESSION_CACHE_MS", "0", PORTAL_TEMPLATE, PORTAL_MANIFEST),
 )
 
 # 审计必开门禁（BIZ-XAPI-10）：生产清单的 API 运行配置必须显式声明

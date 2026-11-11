@@ -13,10 +13,10 @@ import tarfile
 import tempfile
 import unittest
 
-ROOT = Path(__file__).resolve().parents[4]
+ROOT = Path(os.environ.get('UIP_ENGINEERING_ROOT', Path(__file__).resolve().parents[4]))
 WRAPPER = ROOT / '服务器一键离线部署.sh'
 SOURCE = WRAPPER.read_text()
-INSTALLER = ROOT / 'platform/deploy/production/bin/install-assets.sh'
+INSTALLER = Path(__file__).resolve().parents[1] / 'bin/install-assets.sh'
 # 复用独立的真实 OCI 和归档夹具构造过程。检查器保持真实，只有宿主机 Docker 和发布操作使用严格测试替身。
 FIXTURE_SPEC = importlib.util.spec_from_file_location('delivery_upgrade_fixtures', Path(__file__).with_name('test-delivery-inspect.py'))
 FIXTURE = importlib.util.module_from_spec(FIXTURE_SPEC)

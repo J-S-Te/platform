@@ -34,6 +34,7 @@ TEMP_NAME = re.compile(r"\.session-[a-f0-9]{32}\.tmp\Z")
 ARCHIVE_NAME = re.compile(r"[a-f0-9]{32}\.json\Z")
 STATE_NAME = "session.json"
 LOCK_NAME = ".lock"
+ABANDON_REASONS = frozenset({"PRODUCT_DEFECT", "DELIVERY_REPLACED", "OPERATOR_CANCELLED"})
 
 
 class SessionError(ValueError):
@@ -301,6 +302,9 @@ def model(order):
             "stages": [stage_record(key) for key in order], "last_failure": None}
 
 
+# 用途：从阶段记录派生会话状态，放弃不等于完成。
+# 参数：state 是已经验证或正在重放的会话。
+# 返回值：当前状态；全部阶段完成才返回 COMPLETED。
 def overall(state):
     if state["cursor"] == len(state["stages"]):
         return "COMPLETED"
@@ -308,20 +312,34 @@ def overall(state):
     return current["status"] if current["generation"] == state["generation"] else "PENDING"
 
 
+# 用途：给出恢复建议，已放弃会话只能显式开启新批次。
+# 参数：state 是会话进度。
+# 返回值：下一阶段及提示动作，不授予部署权限。
 def advisory(state):
     status = overall(state)
     key = state["stages"][state["cursor"]]["key"] if status != "COMPLETED" else ""
     actions = {"COMPLETED": "VERIFY_REAL_INSTALLATION", "PENDING": "RUN_STAGE",
                "RUNNING": "WAIT_FOR_RUNNER_OR_RESUME", "FAILED": "RESUME_AND_REVERIFY",
-               "WAITING": "OPERATOR_ACTION_AND_RESUME"}
+               "WAITING": "OPERATOR_ACTION_AND_RESUME", "ABANDONED": "START_NEW_SESSION"}
     return {"next_stage": key, "action": actions[status]}
 
 
+# 用途：重放受限事件，确保放弃不擦除历史或跳过阶段。
+# 参数：state 是进度模型；event 是带顺序号的审计事件。
+# 返回值：无；非法事件抛出 SessionError。
 def apply_event(state, event):
-    exact(event, {"sequence", "at", "action", "stage", "status", "reason_code", "generation", "attempt"})
+    keys = {"sequence", "at", "action", "stage", "status", "reason_code", "generation", "attempt"}
+    if event.get("action") == "ABANDON":
+        keys.add("operator_uid")
+    exact(event, keys)
     valid_time(event["at"])
     if type(event["generation"]) is not int or type(event["attempt"]) is not int or not isinstance(event["reason_code"], str) or (event["reason_code"] and not TOKEN.fullmatch(event["reason_code"])):
         reject("INVALID_STATE", "会话事件格式无效")
+    if overall(state) == "ABANDONED":
+        reject("INVALID_TRANSITION", "已放弃会话不能继续执行或恢复", 5)
+    if event["action"] == "ABANDON":
+        apply_abandon_event(state, event)
+        return
     if event["action"] in ("BEGIN", "RESUME"):
         expected = 1 if event["action"] == "BEGIN" else state["generation"] + 1
         if event["generation"] != expected or event["attempt"] != 0 or any(event[key] != "" for key in ("stage", "status", "reason_code")):
@@ -358,6 +376,22 @@ def apply_event(state, event):
                                  "generation": state["generation"]}
     if status in TERMINAL:
         state["cursor"] += 1
+
+
+# 用途：记录当前未完成阶段被放弃，不改变任何先前阶段及失败证据。
+# 参数：state 是进度；event 是包含操作系统用户编号和固定原因的事件。
+# 返回值：无；已完成或无效事件拒绝写入。
+def apply_abandon_event(state, event):
+    if overall(state) == "COMPLETED":
+        reject("INVALID_TRANSITION", "已完成会话无需放弃", 5)
+    current = state["stages"][state["cursor"]]
+    if (event["generation"] != state["generation"] or event["stage"] != current["key"]
+            or event["status"] != "ABANDONED" or event["attempt"] != current["attempts"]
+            or event["reason_code"] not in ABANDON_REASONS
+            or type(event["operator_uid"]) is not int or event["operator_uid"] < 0):
+        reject("INVALID_TRANSITION", "放弃会话事件无效", 5)
+    current.update(status="ABANDONED", generation=state["generation"],
+                   finished_at=event["at"], reason_code=event["reason_code"])
 
 
 def validate_state(value, state_dir):
@@ -460,6 +494,9 @@ def validate_archive_directory(directory):
         check_file(os.stat(name, dir_fd=directory, follow_symlinks=False))
 
 
+# 用途：不覆盖地归档已完成或已放弃的会话，保留全部事件。
+# 参数：state_dir 是原会话目录；value 是终结记录；next_identity 是新介质身份。
+# 返回值：无；历史冲突或不安全文件阻止新建会话。
 def archive_completed(state_dir, value, next_identity):
     archive_path = value["identity"]["target"] + ".installation-history"
     media, archive = Path(next_identity["media"]), Path(archive_path)
@@ -471,12 +508,17 @@ def archive_completed(state_dir, value, next_identity):
         validate_archive_directory(directory)
         final = value["session_id"] + ".json"
 
+        # 用途：检查原子发布重试时已有历史是否与待归档记录完全相同。
+        # 参数：无，使用外层历史目录和终结会话。
+        # 返回值：存在且相同为真；内容冲突时拒绝覆盖。
         def existing_archive():
             try:
                 stored = validate_state(decode(read_file(directory, final)), state_dir)
             except FileNotFoundError:
                 return False
-            if stored["session_id"] != value["session_id"] or overall(stored) != "COMPLETED" or encoded(stored) != encoded(value):
+            if (stored["session_id"] != value["session_id"]
+                    or overall(stored) not in ("COMPLETED", "ABANDONED")
+                    or encoded(stored) != encoded(value)):
                 reject("ARCHIVE_CONFLICT", "已有历史记录与待归档完整会话不一致，拒绝覆盖", 4)
             return True
 
@@ -506,6 +548,9 @@ def archive_completed(state_dir, value, next_identity):
         os.close(directory)
 
 
+# 用途：创建或恢复绑定精确介质的会话，终结旧批次后显式开启全新批次。
+# 参数：state_dir 为记录目录；identity_file 为身份；stages 为计划；其余为显式模式。
+# 返回值：会话标识；身份冲突或非法恢复抛出 SessionError。
 def begin(state_dir, identity_file, stages, resume, new_session=False):
     if resume and new_session:
         reject("INVALID_ARGUMENTS", "--resume 与 --new-session 不能同时使用")
@@ -521,10 +566,12 @@ def begin(state_dir, identity_file, stages, resume, new_session=False):
                 raise
             return create_session(directory, identity, order)
         if new_session:
-            if overall(value) != "COMPLETED":
-                reject("INCOMPLETE_SESSION", "原安装会话尚未完成，必须先以原参数 --resume 收口", 4)
+            if overall(value) not in ("COMPLETED", "ABANDONED"):
+                reject("INCOMPLETE_SESSION", "原会话尚未完成；以原参数 --resume，或停止执行后显式 abandon", 4)
             archive_completed(state_dir, value, identity)
             return create_session(directory, identity, order)
+        if overall(value) == "ABANDONED":
+            reject("ABANDONED_SESSION", "原会话已放弃；使用 --new-session 从全部门禁重新核验", 4)
         if comparable_identity(value["identity"]) != comparable_identity(identity) or value["stage_order"] != order:
             reject("IDENTITY_CONFLICT", "目标、介质摘要、模式、组件、选项或阶段列表与原会话不一致", 4)
         if not resume:
@@ -532,6 +579,65 @@ def begin(state_dir, identity_file, stages, resume, new_session=False):
         event = {"at": now(), "action": "RESUME", "stage": "", "status": "", "reason_code": "", "generation": value["generation"] + 1, "attempt": 0}
         publish(directory, value, event)
         return value["session_id"]
+
+
+# 用途：持有安装长锁，确保放弃不会与真实安装进程并发。
+# 参数：state_dir 为规范会话目录，必须绑定同级安装执行锁。
+# 返回值：上下文管理器；锁忙或文件不安全时拒绝操作。
+@contextmanager
+def idle_runner(state_dir):
+    canonical_path(state_dir)
+    suffix = ".installation-state"
+    if not state_dir.endswith(suffix):
+        reject("IDENTITY_CONFLICT", "会话目录后缀无效", 4)
+    target = state_dir[:-len(suffix)]
+    canonical_path(target)
+    directory = open_directory(str(Path(target).parent))
+    descriptor = None
+    try:
+        check_directory(os.fstat(directory), direct_parent=True)
+        name = Path(target).name + ".installation-run.lock"
+        try:
+            descriptor = os.open(name, os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK,
+                                 dir_fd=directory)
+        except FileNotFoundError:
+            descriptor = os.open(name, os.O_RDWR | os.O_NOFOLLOW | os.O_CREAT | os.O_EXCL,
+                                 0o600, dir_fd=directory)
+            os.fsync(directory)
+        check_file(os.fstat(descriptor))
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            reject("RUNNER_ACTIVE", "安装进程仍持有执行锁；停止执行后才能放弃", 4)
+        yield
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        os.close(directory)
+
+
+# 用途：显式放弃未完成会话，只记录审计，不更改部署、授权或业务数据。
+# 参数：state_dir 是记录目录；session 是预期标识；reason 是受限原因码。
+# 返回值：无；并发执行、标识冲突或原因无效时拒绝操作。
+def abandon(state_dir, session, reason):
+    if not SESSION.fullmatch(session) or reason not in ABANDON_REASONS:
+        reject("INVALID_ARGUMENTS", "放弃会话需要确切标识和支持的固定原因码")
+    with idle_runner(state_dir), locked_directory(state_dir) as directory:
+        value = load_state(directory, state_dir)
+        if session != value["session_id"]:
+            reject("SESSION_MISMATCH", "会话标识不匹配", 5)
+        if overall(value) == "ABANDONED":
+            if value["history"][-1]["reason_code"] != reason:
+                reject("INVALID_TRANSITION", "已放弃会话的审计原因不能覆盖", 5)
+            return
+        if overall(value) == "COMPLETED":
+            reject("INVALID_TRANSITION", "已完成会话无需放弃", 5)
+        current = value["stages"][value["cursor"]]
+        event = {"at": now(), "action": "ABANDON", "stage": current["key"],
+                 "status": "ABANDONED", "reason_code": reason,
+                 "generation": value["generation"], "attempt": current["attempts"],
+                 "operator_uid": os.getuid()}
+        publish(directory, value, event)
 
 
 def update(state_dir, session, stage, status, reason):
@@ -591,14 +697,18 @@ def stage_label(key):
     return key + "（" + label + "）" if label else key
 
 
+# 用途：展示会话恢复建议，明确放弃与实际验收成功的区别。
+# 参数：value 是已验证的状态文档。
+# 返回值：不包含凭据的中文状态说明。
 def human_status(value):
-    labels = {"PENDING": "待执行", "RUNNING": "执行中", "FAILED": "失败", "WAITING": "等待人工处理", "COMPLETED": "阶段记录已完成"}
+    labels = {"PENDING": "待执行", "RUNNING": "执行中", "FAILED": "失败", "WAITING": "等待人工处理", "COMPLETED": "阶段记录已完成", "ABANDONED": "已放弃（未通过验收）"}
     pending = [item["key"] for item in value["stages"][value["cursor"]:]]
     actions = {"VERIFY_REAL_INSTALLATION": "核验真实部署、健康与授权状态；后续升级/增装可显式 --new-session 归档并开启新批次。",
                "RUN_STAGE": "由原一键部署入口按顺序执行当前阶段并核验实际状态。",
                "WAIT_FOR_RUNNER_OR_RESUME": "等待原部署进程；确认已中断后，使用原参数追加 --resume 重验。",
                "RESUME_AND_REVERIFY": "处理固定失败原因后，使用原参数追加 --resume，按顺序真实重验。",
-               "OPERATOR_ACTION_AND_RESUME": "按原部署入口提示完成操作，再以原参数追加 --resume。"}
+               "OPERATOR_ACTION_AND_RESUME": "按原部署入口提示完成操作，再以原参数追加 --resume。",
+               "START_NEW_SESSION": "使用修复介质和 --new-session 开始新批次；旧记录将归档，所有门禁重新核验。"}
     lines = ["安装会话：" + value["session_id"], "状态：" + labels[value["overall_status"]],
              "已完成（本轮记录）：" + (", ".join(map(stage_label, value["completed_stages"])) or "无"),
              "历史已完成、等待重验：" + (", ".join(map(stage_label, value["historical_completed_stages"])) or "无"),
@@ -632,6 +742,9 @@ class SafeParser(argparse.ArgumentParser):
         reject("INVALID_ARGUMENTS", "命令参数不完整或不受支持；使用 --help 查看接口")
 
 
+# 用途：解析部署会话命令，放弃动作必须由操作人显式调用。
+# 参数：argv 是命令参数；为空时读取进程参数。
+# 返回值：成功为零；非法输入通过安全错误模型报告。
 def run(argv=None):
     parser = SafeParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True, parser_class=SafeParser)
@@ -647,6 +760,10 @@ def run(argv=None):
     change.add_argument("--stage", required=True)
     change.add_argument("--status", required=True)
     change.add_argument("--reason-code", default="")
+    stop = commands.add_parser("abandon", help="停止执行后放弃未完成会话，保留审计")
+    stop.add_argument("--state-dir", required=True)
+    stop.add_argument("--session", required=True)
+    stop.add_argument("--reason-code", required=True, choices=sorted(ABANDON_REASONS))
     show = commands.add_parser("status")
     show.add_argument("--state-dir", required=True)
     show.add_argument("--format", choices=("human", "json"), default="human")
@@ -655,6 +772,8 @@ def run(argv=None):
         print(begin(args.state_dir, args.identity_file, args.stages, args.resume, args.new_session))
     elif args.command == "update":
         update(args.state_dir, args.session, args.stage, args.status, args.reason_code)
+    elif args.command == "abandon":
+        abandon(args.state_dir, args.session, args.reason_code)
     else:
         value = status_document(args.state_dir)
         print(json.dumps(value, ensure_ascii=False, sort_keys=True) if args.format == "json" else human_status(value))

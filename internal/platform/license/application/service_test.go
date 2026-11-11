@@ -7,6 +7,7 @@ import (
 	"errors"
 	"github.com/J-S-Te/Basic-Platform/internal/platform/license/domain"
 	core "github.com/J-S-Te/license-core"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -171,7 +172,7 @@ func TestPendingWholeReplacementAndVersionConcurrency(t *testing.T) {
 	}
 	third.ConfirmReplacePending = true
 	third.ExpectedRevision--
-	if _, e = f.s.Commit(ctx, third, testActor); !errors.Is(e, domain.ErrConflict) {
+	if _, e = f.s.Commit(ctx, third, testActor); !errors.Is(e, domain.ErrExpectationMismatch) {
 		t.Fatal(e)
 	}
 	f.now = time.Unix(n+3600, 0)
@@ -201,7 +202,7 @@ func TestPreviewNoWritesAndExplicitChanges(t *testing.T) {
 	}
 	in.ConfirmChanges = true
 	in.Digest = "wrong"
-	if _, e := f.s.Commit(ctx, in, testActor); !errors.Is(e, domain.ErrConflict) {
+	if _, e := f.s.Commit(ctx, in, testActor); !errors.Is(e, domain.ErrExpectationMismatch) {
 		t.Fatal(e)
 	}
 }
@@ -310,8 +311,101 @@ func TestDeterministicFailuresAreNotReportedAsConflicts(t *testing.T) {
 	}
 	stale := f.input(t, f.sign(t, 2, n))
 	stale.ExpectedRevision--
-	if _, e := f.s.Commit(ctx, stale, testActor); !errors.Is(e, domain.ErrConflict) {
-		t.Fatalf("stale revision commit must stay transient: %v", e)
+	if _, e := f.s.Commit(ctx, stale, testActor); !errors.Is(e, domain.ErrExpectationMismatch) {
+		t.Fatalf("stale revision commit must report the mismatched expectation: %v", e)
+	}
+}
+
+// 提交期望值不一致属确定性失败：必须逐字段报出期望值与实际值，且不得并入瞬时的 ErrConflict，
+// 否则运维与脚本都会把“重新预览核对”误当成“稍后重试”。
+func TestCommitExpectationMismatchNamesFieldAndValues(t *testing.T) {
+	f := setup(t)
+	ctx := context.Background()
+	n := f.now.Unix()
+	if _, e := f.s.Commit(ctx, f.input(t, f.sign(t, 1, n)), testActor); e != nil {
+		t.Fatal(e)
+	}
+	// 第二个版本尚未生效：形成挂起状态，才能构造 pending_digest 的期望值差异。
+	if _, e := f.s.Commit(ctx, f.input(t, f.sign(t, 2, n+3600)), testActor); e != nil {
+		t.Fatal(e)
+	}
+	base := f.input(t, f.sign(t, 3, n+3600))
+	if base.ExpectedPendingDigest == "" || base.ExpectedRevision == 0 || base.ExpectedCurrentVersion != 1 {
+		t.Fatalf("unexpected baseline %+v", base)
+	}
+	valid := strings.Repeat("a", 64)
+	cases := []struct {
+		name     string
+		mutate   func(*CommitInput)
+		field    string
+		expected string
+	}{
+		{"digest", func(in *CommitInput) { in.Digest = valid }, "digest", valid},
+		{"revision", func(in *CommitInput) { in.ExpectedRevision++ }, "revision", strconv.FormatUint(base.ExpectedRevision+1, 10)},
+		{"current_version", func(in *CommitInput) { in.ExpectedCurrentVersion++ }, "current_version", strconv.FormatUint(base.ExpectedCurrentVersion+1, 10)},
+		{"pending_digest", func(in *CommitInput) { in.ExpectedPendingDigest = "" }, "pending_digest", "（无）"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			in := base
+			c.mutate(&in)
+			_, e := f.s.Commit(ctx, in, testActor)
+			if !errors.Is(e, domain.ErrExpectationMismatch) {
+				t.Fatalf("mismatch not reported as an expectation failure: %v", e)
+			}
+			if errors.Is(e, domain.ErrConflict) {
+				t.Fatalf("deterministic mismatch aliases the transient conflict: %v", e)
+			}
+			var mismatch *domain.ExpectationError
+			if !errors.As(e, &mismatch) || mismatch == nil || len(mismatch.Diffs) != 1 {
+				t.Fatalf("mismatch error shape: %#v", e)
+			}
+			d := mismatch.Diffs[0]
+			if d.Field != c.field || d.Expected != c.expected || d.Actual == "" || d.Actual == c.expected {
+				t.Fatalf("diff = %+v, want field %q expected %q and a distinct actual value", d, c.field, c.expected)
+			}
+			message := domain.ExpectationMessage(mismatch.Diffs)
+			if !strings.Contains(message, "重新预览") || len([]rune(message)) > 400 {
+				t.Fatalf("message = %q", message)
+			}
+			// 确定性失败：同一请求重试的结果不会改变，脚本不应把它当作可自愈的 CAS 冲突。
+			if _, again := f.s.Commit(ctx, in, testActor); !errors.Is(again, domain.ErrExpectationMismatch) {
+				t.Fatalf("retry classification changed: %v", again)
+			}
+		})
+	}
+	// 多个字段同时不一致时，顺序固定为 digest → revision → current_version → pending_digest。
+	in := base
+	in.Digest = valid
+	in.ExpectedRevision++
+	in.ExpectedCurrentVersion++
+	in.ExpectedPendingDigest = ""
+	_, e := f.s.Commit(ctx, in, testActor)
+	var mismatch *domain.ExpectationError
+	if !errors.As(e, &mismatch) || len(mismatch.Diffs) != 4 {
+		t.Fatalf("combined mismatch %#v (%v)", e, e)
+	}
+	for i, field := range []string{"digest", "revision", "current_version", "pending_digest"} {
+		if mismatch.Diffs[i].Field != field {
+			t.Fatalf("diff[%d] = %+v, want field %q", i, mismatch.Diffs[i], field)
+		}
+	}
+	// 客户端提交的任意超长摘要不得回显，只能落成固定文案。
+	tooLong := strings.Repeat("z", 4096)
+	overflow := base
+	overflow.Digest = tooLong
+	overflow.ExpectedPendingDigest = tooLong
+	_, e = f.s.Commit(ctx, overflow, testActor)
+	if !errors.As(e, &mismatch) || len(mismatch.Diffs) != 2 {
+		t.Fatalf("oversized mismatch %#v (%v)", e, e)
+	}
+	for _, d := range mismatch.Diffs {
+		if strings.Contains(d.Expected, "z") || len(d.Expected) > 64 || d.Expected != "无效摘要" {
+			t.Fatalf("oversized client value echoed back: %+v", d)
+		}
+	}
+	if message := domain.ExpectationMessage(mismatch.Diffs); strings.Contains(message, tooLong) || len([]rune(message)) > 400 {
+		t.Fatalf("oversized value leaked into the message: %q", message)
 	}
 }
 func TestWriteActorRequiredAndValidated(t *testing.T) {

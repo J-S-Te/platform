@@ -76,6 +76,7 @@ func decode(w http.ResponseWriter, r *http.Request, target any) bool {
 }
 func writeError(w http.ResponseWriter, r *http.Request, e error) {
 	code, status, message := "LICENSE_STORAGE_FAILED", 500, "授权存储暂时不可用，请稍后重试"
+	var details any
 	switch {
 	case errors.Is(e, domain.ErrNotInitialized):
 		code, status, message = "LICENSE_NOT_INITIALIZED", 409, "请先初始化部署实例"
@@ -83,6 +84,12 @@ func writeError(w http.ResponseWriter, r *http.Request, e error) {
 		code, status, message = "LICENSE_BINDING_MISMATCH", 409, "该部署实例已绑定其他客户或环境，不能在此环境初始化"
 	case errors.Is(e, domain.ErrVersionNotIncreasing):
 		code, status, message = "LICENSE_VERSION_NOT_INCREASING", 409, "该许可证版本不高于当前已生效版本，无需重复导入；如需变更请让厂商签发更高版本"
+	case errors.Is(e, domain.ErrExpectationMismatch):
+		// 确定性失败：期望值没有随状态推进更新，重试同一请求不会成功，必须重新预览核对。
+		// ErrConflict 只留给真正的瞬时冲突，脚本按错误码分类重试。
+		mismatches := expectationDiffs(e)
+		code, status, message = "LICENSE_EXPECTATION_MISMATCH", 409, domain.ExpectationMessage(mismatches)
+		details = map[string]any{"mismatched": mismatches}
 	case errors.Is(e, domain.ErrConflict):
 		code, status, message = "LICENSE_VERSION_CONFLICT", 409, "授权状态已变化或版本过旧，请重新预览"
 	case errors.Is(e, domain.ErrConfirmation):
@@ -96,7 +103,16 @@ func writeError(w http.ResponseWriter, r *http.Request, e error) {
 	case errors.Is(e, domain.ErrInvalid), errors.Is(e, core.ErrInvalid), errors.Is(e, core.ErrDenied), errors.Is(e, core.ErrRollback):
 		code, status, message = "LICENSE_VALIDATION_FAILED", 400, "许可证或请求无效，请检查签名、实例、环境及字段"
 	}
-	httpresponse.WriteError(w, r, status, httperror.New(code, message, nil))
+	httpresponse.WriteError(w, r, status, httperror.New(code, message, details))
+}
+
+// expectationDiffs 取出错误里的逐字段差异；任何一条都不能丢失，否则运维看不到具体字段。
+func expectationDiffs(e error) []domain.ExpectationDiff {
+	var mismatch *domain.ExpectationError
+	if errors.As(e, &mismatch) && mismatch != nil && len(mismatch.Diffs) > 0 {
+		return mismatch.Diffs
+	}
+	return []domain.ExpectationDiff{}
 }
 
 // appEnforcement 是单个应用的运行强制执行聚合；不可用或未登记也保留结构，

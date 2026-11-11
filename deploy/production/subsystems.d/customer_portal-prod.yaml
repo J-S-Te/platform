@@ -41,11 +41,17 @@ runtime:
         PORTAL_OIDC_SCOPES: openid profile
         PORTAL_ROLE_CONFIG_HASH: sha256:b773a9ab0a43370b7a2f0d454f32c21a6ea405d2c8837ebb60b7b6783a245eef
         PORTAL_SESSION_COOKIE_NAME: customer_portal_session
+        # 中央会话只读缓存显式关闭（0=关闭；开启后平台撤销/登出的本地生效延迟≤该毫秒值，上限 5000）。
+        CENTRAL_SESSION_CACHE_MS: "0"
         PORTAL_AUTHORIZATION_CATALOG_SYNC_ENABLED: "true"
         PORTAL_PLATFORM_BASE_URL: http://platform-api:8080
         PLATFORM_APPLICATION_CODE: customer_portal
         PLATFORM_ENVIRONMENT_CODE: prod
         PLATFORM_AUDIT_REQUIRED: "true"
+        # 审计清理已启用：保留 60 天（已批准，2026-11-07 决策）。针对本子系统
+        # portal_application_request_audit_outbox；删除对象是仅保存在本地的已投递审计证据，
+        # 平台侧另有副本；保留期不得低于审计要求，变更需重新审批（见对应子系统模板注释）。
+        AUDIT_OUTBOX_DELIVERED_RETENTION_DAYS: "60"
         FILE_GATEWAY_BASE_URL: http://file-gateway:8086
         FILE_GATEWAY_SCOPE: platform:file:upload platform:file:bind platform:file:download
       bindings:

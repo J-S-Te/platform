@@ -2,6 +2,7 @@
 """回归部署进度命令行，不使用 Docker、服务器、密钥或数据库。"""
 from concurrent.futures import ThreadPoolExecutor
 import copy
+import fcntl
 import importlib.util
 import json
 import os
@@ -27,6 +28,77 @@ def save(path, value):
 
 
 class DeploymentSessionTests(unittest.TestCase):
+    # 用途：验证放弃保留等待历史，新介质会话不继承完成记录。
+    # 参数：无。
+    # 返回值：无；状态或审计不符时断言失败。
+    def test_abandon_preserves_evidence_and_new_session_rechecks_all_stages(self):
+        session = self.begin()
+        self.finish(session, "media-check")
+        self.update(session, "assets", "RUNNING")
+        self.update(session, "assets", "WAITING", "ASSETS_RECOVERY_REQUIRED")
+        before = self.status()
+        args = ["abandon", "--state-dir", self.state, "--session", session,
+                "--reason-code", "DELIVERY_REPLACED"]
+        self.cli(*args)
+        abandoned = self.status()
+        self.assertEqual(abandoned["overall_status"], "ABANDONED")
+        self.assertEqual(abandoned["history"][:-1], before["history"])
+        self.assertEqual(abandoned["history"][-1]["operator_uid"], os.getuid())
+        self.assertEqual(abandoned["stages"][1]["status"], "ABANDONED")
+        self.assertEqual(abandoned["completed_stages"], ["media-check"])
+        self.cli(*args)  # 相同操作幂等，不追加虚假审计。
+        self.assertEqual(self.status()["history"], abandoned["history"])
+        self.begin(resume=True, code=4)
+        self.update(session, "assets", "RUNNING", code=5)
+        self.next_identity()
+        next_session = self.begin(new_session=True)
+        self.assertNotEqual(next_session, session)
+        fresh = self.status()
+        self.assertEqual(fresh["overall_status"], "PENDING")
+        self.assertEqual(fresh["completed_stages"], [])
+        archived = json.loads((self.history / (session + ".json")).read_text())
+        self.assertEqual(archived["history"], abandoned["history"])
+
+    # 用途：验证运行中的长锁及过期会话标识阻止放弃，且不篡改记录。
+    # 参数：无。
+    # 返回值：无；未安全拒绝时断言失败。
+    def test_abandon_requires_idle_runner_and_matching_session(self):
+        session = self.begin()
+        before = (self.state / "session.json").read_bytes()
+        args = ["abandon", "--state-dir", self.state, "--session", session,
+                "--reason-code", "PRODUCT_DEFECT"]
+        lock = Path(str(self.target) + ".installation-run.lock")
+        with lock.open("wb") as stream:
+            lock.chmod(0o600)
+            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self.cli(*args, code=4)
+        self.assertEqual((self.state / "session.json").read_bytes(), before)
+        self.cli("abandon", "--state-dir", self.state, "--session", "b" * 32,
+                 "--reason-code", "PRODUCT_DEFECT", code=5)
+        self.cli("abandon", "--state-dir", self.state, "--session", session,
+                 "--reason-code", "INVALID_REASON", code=2)
+        self.assertEqual((self.state / "session.json").read_bytes(), before)
+
+    # 用途：验证放弃记录归档后新会话提交中断可安全重试。
+    # 参数：无。
+    # 返回值：无；旧档覆盖、证据丢失或跳过重验时失败。
+    def test_abandoned_archive_survives_interrupted_new_session(self):
+        session = self.begin()
+        self.cli("abandon", "--state-dir", self.state, "--session", session,
+                 "--reason-code", "PRODUCT_DEFECT")
+        before = (self.state / "session.json").read_bytes()
+        self.next_identity()
+        with mock.patch.object(MODULE.os, "replace", side_effect=OSError("synthetic interruption")):
+            with self.assertRaises(OSError):
+                MODULE.begin(str(self.state), str(self.input), self.order, False, True)
+        archived = self.history / (session + ".json")
+        self.assertEqual(archived.read_bytes(), before)
+        self.assertEqual((self.state / "session.json").read_bytes(), before)
+        self.begin(new_session=True)
+        self.assertEqual(archived.read_bytes(), before)
+        self.assertEqual(self.status()["overall_status"], "PENDING")
+        self.assertEqual(self.status()["completed_stages"], [])
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="uip-session-test-")
         self.addCleanup(self.temp.cleanup)

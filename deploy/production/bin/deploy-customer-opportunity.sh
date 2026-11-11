@@ -444,6 +444,7 @@ release_updated=false
 release_committed=false
 customer_runtime_updated=false
 portal_runtime_updated=false
+portal_migration_started=false
 restore_customer_runtime() {
   [[ "$customer_runtime_updated" == true && -f "$previous_customer_runtime" ]] || return 0
   if ! mv -f "$previous_customer_runtime" "$customer_runtime_file"; then
@@ -486,10 +487,17 @@ restore_release() {
   fi
   [[ "$restore_failed" == false ]]
 }
+# 用途：结束发布并清理临时快照；Portal迁移开始后失败只允许前向恢复。
+# 参数：无，读取发布提交状态和Portal迁移状态。
+# 返回值：保留失败退出码，未提交的迁移尝试至少返回非零并尽力保持停写。
 cleanup() {
   local exit_code=$?
   trap - EXIT INT TERM
-  if [[ "$release_updated" == true && "$release_committed" != true && -f "$previous_release" ]]; then
+  if [[ "$portal_migration_started" == true && "$release_committed" != true ]]; then
+    ((exit_code != 0)) || exit_code=1
+    stop_portal_runtime || echo '严重：Portal停止失败，请立即人工阻断写入。' >&2
+    echo 'Portal迁移已开始，保留候选镜像与运行配置并保持停写；请人工核对RUNNING检查点后前向修复或受控重试。' >&2
+  elif [[ "$release_updated" == true && "$release_committed" != true && -f "$previous_release" ]]; then
     restore_release || true
   elif [[ "$release_committed" != true ]]; then
     restore_customer_runtime || true
@@ -825,7 +833,38 @@ verify_service_image() {
   echo "$service_name 已运行目标不可变镜像：$expected_image"
 }
 
+# 用途：停止选中Portal写入者，先关闭API入口，再按Compose宽限期停止后台。
+# 参数：无，读取受控选择的Portal运行服务集合。
+# 返回值：全部停止为零；任一步停止失败为非零，不继续迁移。
+stop_portal_runtime() {
+  local runtime_service api_selected=false stop_failed=false
+  local -a portal_background_services=()
+  while read -r runtime_service; do
+    [[ -n "$runtime_service" ]] || continue
+    if [[ "$runtime_service" == portal-api ]]; then
+      api_selected=true
+    else
+      portal_background_services+=("$runtime_service")
+    fi
+  done <<< "$portal_selected_runtime"
+  if [[ "$api_selected" == true ]]; then
+    compose stop portal-api || stop_failed=true
+  fi
+  if ((${#portal_background_services[@]} > 0)); then
+    compose stop "${portal_background_services[@]}" || stop_failed=true
+  fi
+  [[ "$stop_failed" == false ]]
+}
+
+# 用途：迁移前按既有镜像恢复运行态，Portal迁移开始后保持停写供前向恢复。
+# 参数：无，读取迁移状态、上一发布快照与选中Worker集合。
+# 返回值：迁移前沿用恢复结果；迁移开始后返回非零并禁止旧Portal重启。
 rollback_runtime() {
+  if [[ "$portal_migration_started" == true ]]; then
+    stop_portal_runtime || echo '严重：Portal停止失败，请立即人工阻断写入。' >&2
+    echo 'Portal迁移已开始，禁止恢复旧Portal代码；保留候选配置，请核对RUNNING检查点后前向修复或受控重试。' >&2
+    return 1
+  fi
   restore_release
   local previous_crm previous_portal
   previous_crm="$(env_value_from "$release_file" CUSTOMER_CRM_IMAGE)"
@@ -862,10 +901,14 @@ if ! compose run --no-deps customer-migrate; then
   exit 1
 fi
 echo "执行 Portal 语句级生产迁移"
+if ! stop_portal_runtime; then
+  echo 'Portal写入者未全部停止，未开始Portal迁移；请人工核对后重试。' >&2
+  exit 1
+fi
+# 执行器可能在非零退出前已提交部分DDL，从启动迁移起禁止恢复旧Portal代码。
+portal_migration_started=true
 if ! compose run --no-deps portal-migrate; then
-  restore_release
-  rm -f "$previous_release"
-  echo "Portal 迁移失败；数据库不会自动反向回滚，请按 RUNNING 检查点进行人工核验" >&2
+  echo "Portal迁移失败，保持停写和候选配置；数据库不会自动反向回滚，请核对RUNNING检查点后前向修复。" >&2
   exit 1
 fi
 
@@ -873,57 +916,55 @@ echo "切换 CRM API"
 if ! compose up -d --force-recreate --no-deps --wait --wait-timeout 120 customer-api || \
    ! wait_for_health "http://127.0.0.1:$(port_value CUSTOMER_API_PORT 18083)/customer-opportunity/healthz"; then
   compose logs --tail 100 customer-api >&2 || true
-  rollback_runtime
+  rollback_runtime || true
   rm -f "$previous_release"
-  echo "CRM 发布失败，已恢复上一镜像；已执行的数据库迁移不会反向回滚" >&2
+  echo "CRM发布失败；Portal保持停写和候选配置，请人工核对后前向修复。" >&2
   exit 1
 fi
 verify_service_image customer-api "$crm_image_ref" || {
-  rollback_runtime
+  rollback_runtime || true
   rm -f "$previous_release"
   exit 1
 }
 echo "自动发布 CRM 授权目录（角色及有效角色数量策略）"
 if ! compose run --rm --no-deps customer-api ./authz-catalog publish crm; then
   compose logs --tail 100 customer-api >&2 || true
-  rollback_runtime
+  rollback_runtime || true
   rm -f "$previous_release"
-  echo "CRM 授权目录发布失败；已恢复运行时配置，未继续切换 Portal" >&2
+  echo "CRM授权目录发布失败；Portal保持停写和候选配置，未继续开放API。" >&2
   exit 1
 fi
 
-echo "切换 Portal API"
-if ! compose up -d --force-recreate --no-deps --wait --wait-timeout 120 portal-api || \
-   ! wait_for_health "http://127.0.0.1:$(port_value PORTAL_API_PORT 18084)/customer-portal/healthz"; then
-  compose logs --tail 100 portal-api >&2 || true
-  rollback_runtime
-  rm -f "$previous_release"
-  echo "Portal 发布失败，已恢复上一镜像；已执行的数据库迁移不会反向回滚" >&2
-  exit 1
-fi
-if ! verify_service_image portal-api "$portal_image_ref" || ! verify_portal_proxy_runtime; then
-  rollback_runtime
-  rm -f "$previous_release"
-  exit 1
-fi
-
-echo "切换 CRM Workers 与 Portal 邀请补偿 Worker"
+echo "切换 CRM Workers、Portal报告与邀请补偿Worker"
 if ! compose up -d --force-recreate --no-deps "${customer_worker_services[@]}" || ! wait_for_workers; then
   compose logs --tail 100 "${customer_worker_services[@]}" >&2 || true
-  rollback_runtime
+  rollback_runtime || true
   rm -f "$previous_release"
-  echo "CRM/Portal Worker 发布失败，已恢复上一镜像；已执行的数据库迁移不会反向回滚" >&2
+  echo "CRM/Portal Worker发布失败；Portal保持停写和候选配置，等待前向修复。" >&2
   exit 1
 fi
 for worker_service in "${customer_worker_services[@]}"; do
   worker_image="$crm_image_ref"
   [[ "$worker_service" != "portal-invite-compensation-worker" && "$worker_service" != "portal-report-worker" ]] || worker_image="$portal_image_ref"
   verify_service_image "$worker_service" "$worker_image" || {
-    rollback_runtime
+    rollback_runtime || true
     rm -f "$previous_release"
     exit 1
   }
 done
+
+echo "切换 Portal API"
+if ! compose up -d --force-recreate --no-deps --wait --wait-timeout 120 portal-api || \
+   ! wait_for_health "http://127.0.0.1:$(port_value PORTAL_API_PORT 18084)/customer-portal/healthz"; then
+  compose logs --tail 100 portal-api >&2 || true
+  rollback_runtime || true
+  echo "Portal发布失败，保持停写和候选配置，等待人工核对后前向修复。" >&2
+  exit 1
+fi
+if ! verify_service_image portal-api "$portal_image_ref" || ! verify_portal_proxy_runtime; then
+  rollback_runtime || true
+  exit 1
+fi
 
 release_committed=true
 compose ps customer-api portal-api "${customer_worker_services[@]}" customer-mysql portal-mysql

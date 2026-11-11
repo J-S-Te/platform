@@ -1,7 +1,7 @@
 module github.com/J-S-Te/Basic-Platform
 
 go 1.26.4
-toolchain go1.26.10
+toolchain go1.26.11
 
 require (
 	github.com/J-S-Te/license-core v0.0.0

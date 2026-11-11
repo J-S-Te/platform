@@ -33,6 +33,8 @@ runtime:
         OIDC_SESSION_COOKIE_NAME: settlement_session
         OIDC_SESSION_IDLE_TTL: 30m
         OIDC_SESSION_ABSOLUTE_TTL: 8h
+        # 中央会话只读缓存显式关闭（0=关闭；开启后平台撤销/登出的本地生效延迟≤该毫秒值，上限 5000）。
+        CENTRAL_SESSION_CACHE_MS: "0"
         SETTLEMENT_DEVELOPMENT_AUTH: "false"
         SETTLEMENT_OUTBOX_BATCH_SIZE: "50"
         SETTLEMENT_INVOICE_ISSUANCE_MODE: manual
