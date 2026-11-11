@@ -29,7 +29,7 @@ doctor_release_keys() {
 }
 
 doctor_check_config_files() {
-  printf '\n[1/7] 运行配置文件存在性与权限\n'
+  printf '\n[1/8] 运行配置文件存在性与权限\n'
   local file label mode
   for file in "$runtime_file" "$release_file"; do
     label="${file##*/}"
@@ -55,7 +55,7 @@ doctor_check_config_files() {
 }
 
 doctor_check_packages() {
-  printf '\n[2/7] packages/ 镜像包伴随校验文件\n'
+  printf '\n[2/8] packages/ 镜像包伴随校验文件\n'
   shopt -s nullglob
   local archives=("$package_dir"/*-linux-amd64.tar.gz)
   shopt -u nullglob
@@ -84,7 +84,7 @@ doctor_check_packages() {
 }
 
 doctor_check_manifests() {
-  printf '\n[3/7] manifests/ 导入记录与 .release.env 不可变引用\n'
+  printf '\n[3/8] manifests/ 导入记录与 .release.env 不可变引用\n'
   shopt -s nullglob
   local records=("$manifest_dir"/*.imported)
   shopt -u nullglob
@@ -206,7 +206,7 @@ doctor_check_manifests() {
 }
 
 doctor_check_provisioner_binding() {
-  printf '\n[4/7] subsystem-provisioner 容器内 .release.env 绑定一致性\n'
+  printf '\n[4/8] subsystem-provisioner 容器内 .release.env 绑定一致性\n'
   if [[ "$doctor_docker_available" != true ]]; then
     doctor_warn '未找到 docker 命令，跳过容器内 .release.env 比对'
     return 0
@@ -260,7 +260,7 @@ doctor_check_provisioner_binding() {
 }
 
 doctor_check_runtime_placeholders() {
-  printf '\n[5/7] runtime/*.env 待平台下发的凭据\n'
+  printf '\n[5/8] runtime/*.env 待平台下发的凭据\n'
   shopt -s nullglob
   local files=("$deploy_dir"/runtime/*.env)
   shopt -u nullglob
@@ -325,7 +325,7 @@ doctor_duration_seconds() {
 # 输出警告，不阻断部署：取值非法时 platform-api 自己会拒绝启动（fail-closed），
 # doctor 的作用是提前把原因说清楚。
 doctor_check_secret_retirement_policy() {
-  printf '\n[6/7] 旧 OAuth Client Secret 退役策略\n'
+  printf '\n[6/8] 旧 OAuth Client Secret 退役策略\n'
   if [[ ! -f "$runtime_file" || -L "$runtime_file" ]]; then
     doctor_warn "无法读取 ${runtime_file##*/}，跳过旧 OAuth Client Secret 退役策略检查"
     return 0
@@ -367,9 +367,86 @@ doctor_check_secret_retirement_policy() {
   esac
 }
 
+# 公开传输一致性（现场事故类）：OIDC 回跳地址与 Secure Cookie 是“部署期才能算出”的值，
+# 编排侧用 Compose 必填语法（:?）要求它们存在于 --env-file 里。这里同时检查三件事——
+#   1) .env 是否已持久化当前解析值（compose 只读 .env，裸 compose up 才能拿到正确值）；
+#   2) 持久化值是否等于当前解析值（改过 IP/端口/HTTPS 开关后未重跑 configure 的漂移）；
+#   3) 运行中容器的生效环境变量是否等于部署声明（绕过 deploy.sh 的 compose up 会留下错值）。
+# 任一不一致都判失败并给出可执行修复命令：健康检查永远不会发现这类故障，登录才会。
+doctor_transport_component() {
+  case "$1" in
+    platform-api) printf 'platform' ;;
+    contract-api) printf 'contract' ;;
+    customer-api) printf 'customer-opportunity' ;;
+    portal-api) printf 'customer-portal' ;;
+    project-api) printf 'project' ;;
+    settlement-api) printf 'settlement' ;;
+    data-analysis-api) printf 'data-analysis' ;;
+    *) return 1 ;;
+  esac
+}
+
+doctor_check_public_transport() {
+  printf '\n[7/8] 公开传输：部署声明、.env 持久化与运行中容器\n'
+  if [[ ! -f "$runtime_file" || -L "$runtime_file" ]]; then
+    doctor_warn "无法读取 ${runtime_file##*/}，跳过公开传输一致性检查"
+    return 0
+  fi
+  if ! public_transport_prepare "$deploy_dir" "$runtime_file"; then
+    # 非 root 无法读取 0600 的证书/私钥时同样会在这里失败；那是权限边界而不是配置缺陷，
+    # 只提示并建议 sudo 复核，避免把“只能 sudo 检查”误报成阻断问题。
+    if [[ "${EUID:-$(id -u)}" != 0 ]]; then
+      doctor_warn "公开传输配置无法解析（当前用户非 root；HTTPS 证书可能不可读）：请执行 sudo $0 doctor 复核，配置缺陷需 sudo $0 configure --force"
+    else
+      doctor_fail "公开传输配置无法解析（.env 的公开主机/端口/PUBLIC_HTTPS_ENABLED）：compose 会因必填变量缺失而拒绝启动；修复：sudo $0 configure --force"
+    fi
+    return 0
+  fi
+  local key expected persisted advisory
+  # 编排侧必填（:?）：缺失或过期都会让 compose 直接失败，或让容器继续用旧值。
+  for key in PUBLIC_PLATFORM_ORIGIN PUBLIC_SSO_ORIGIN PUBLIC_TRANSPORT_COOKIE_SECURE \
+    PUBLIC_TRANSPORT_KEYCLOAK_REQUIRE_HTTPS; do
+    expected="${!key:-}"
+    persisted="$(env_get "$runtime_file" "$key")"
+    if [[ -z "$persisted" ]]; then
+      doctor_fail "${key} 未持久化到 .env（当前解析值 ${expected}）：裸 docker compose --env-file .env up 会因必填变量缺失而失败；修复：sudo $0 configure --force"
+    elif [[ "$persisted" != "$expected" ]]; then
+      doctor_fail "${key} 在 .env 中是 ${persisted}，当前配置解析为 ${expected}：容器会按 .env 的旧值运行（登录回跳/Cookie 策略错）；修复：sudo $0 configure --force 后按组件重建容器"
+    fi
+  done
+  # 允许非回环 HTTP 会话的开关在编排侧保留安全默认（缺省 false＝拒绝），因此缺失只提示；
+  # 但已持久化的值必须与解析结果一致，否则 HTTP/HTTPS 切换后的会话策略会自相矛盾。
+  key=PUBLIC_TRANSPORT_ALLOW_INSECURE_HTTP
+  expected="${!key:-}"
+  persisted="$(env_get "$runtime_file" "$key")"
+  if [[ -z "$persisted" ]]; then
+    doctor_warn "${key} 未持久化到 .env：compose 会用安全默认 false；HTTP 过渡部署需要它=true，请执行 sudo $0 configure --force"
+  elif [[ "$persisted" != "$expected" ]]; then
+    doctor_fail "${key} 在 .env 中是 ${persisted}，当前配置解析为 ${expected}：非回环 HTTP 会话会被拒绝或错误放行；修复：sudo $0 configure --force 后按组件重建容器"
+  fi
+  ((doctor_failures == 0)) || return 0
+  if [[ "$doctor_docker_available" != true ]]; then
+    doctor_warn '未找到 docker 命令，跳过运行中容器的公开传输比对'
+    return 0
+  fi
+  local drift_output='' drift_status=0 service drift_key declared actual component
+  drift_output="$(public_transport_runtime_drift)" || drift_status=$?
+  case "$drift_status" in
+    0) doctor_ok '运行中 OIDC 消费者的回跳地址与 Secure Cookie 与部署声明一致（未启动的服务跳过）' ;;
+    2) doctor_warn "无法解析部署声明，跳过运行态比对：${drift_output}" ;;
+    *)
+      while IFS=$'\t' read -r service drift_key declared actual; do
+        [[ -n "$service" ]] || continue
+        component="$(doctor_transport_component "$service" 2>/dev/null || true)"
+        doctor_fail "运行中容器 ${service} 的 ${drift_key}=${actual}，与部署声明 ${declared} 不一致：登录回跳或 Cookie 策略错（典型 401 死循环）；修复：sudo $0 configure --force 后执行 sudo $0 deploy ${component:-<component>}"
+      done <<< "$drift_output"
+      ;;
+  esac
+}
+
 doctor_check_subsystem() {
   local component="$1"
-  printf '\n[7/7] 子系统 %s\n' "$component"
+  printf '\n[8/8] 子系统 %s\n' "$component"
 
   case "$component" in
     customer-opportunity|customer-portal|contract|project|reimbursement|settlement|data-analysis) ;;
@@ -412,6 +489,7 @@ doctor() {
   doctor_check_provisioner_binding
   doctor_check_runtime_placeholders
   doctor_check_secret_retirement_policy
+  doctor_check_public_transport
   if [[ -n "$component" ]]; then
     doctor_check_subsystem "$component"
   fi

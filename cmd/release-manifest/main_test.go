@@ -144,7 +144,7 @@ func TestGenerateManifestAndVerify(t *testing.T) {
 	}
 	evidenceRaw, _ := json.Marshal(evidence)
 	writeTestFile(t, filepath.Join(media, "build-evidence.json"), evidenceRaw)
-	for index := 0; index < 6; index++ {
+	for index := 0; index < 7; index++ {
 		writeTestFile(t, filepath.Join(profilesDir, string(rune('a'+index))+".yaml"), []byte("profile: "+string(rune('a'+index))+"\n"))
 	}
 	specValue := map[string]any{
@@ -205,7 +205,7 @@ func TestGenerateManifestAndVerify(t *testing.T) {
 	if err != nil {
 		t.Fatalf("VerifyMedia: %v", err)
 	}
-	if plan.Status != "VERIFIED" || plan.ReleaseID != "test" || len(plan.Profiles) != 6 {
+	if plan.Status != "VERIFIED" || plan.ReleaseID != "test" || len(plan.Profiles) != 7 {
 		t.Fatalf("unexpected plan: %+v", plan)
 	}
 }

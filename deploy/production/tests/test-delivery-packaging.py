@@ -291,6 +291,9 @@ class DeliveryPackaging(unittest.TestCase):
         self.assertFalse((self.output / ("platform-backend-" + VERSION + "-linux-amd64.tar.gz")).exists())
         self.assertTrue((self.output / "BUILD_INFO.txt").is_file())
 
+    # 用途：验证增装保留原介质并以固定版本目录归档当前清理工具。
+    # 参数：self为隔离交付夹具，不访问真实Docker或业务数据。
+    # 返回值：无；原介质被修改、归档根漂移或工具未重新绑定时失败。
     def test_extension_accepts_baseline_with_reset_tool_and_rebinds_current_tool(self):
         self.build()
         baseline = self.output
@@ -312,7 +315,9 @@ class DeliveryPackaging(unittest.TestCase):
             self.assertEqual((baseline/name).read_bytes(),raw,'baseline changed: '+name)
         archive_path = self.root/('uip-offline-delivery-'+version+'-linux-amd64.tar')
         with tarfile.open(archive_path) as archive:
-            self.assertEqual(archive.extractfile('extension/清理首次部署产物.sh').read(),
+            roots = {member.name.split('/', 1)[0] for member in archive}
+            self.assertEqual(roots, {version})
+            self.assertEqual(archive.extractfile(version + '/清理首次部署产物.sh').read(),
                              (output/'清理首次部署产物.sh').read_bytes())
         checked = self.command([sys.executable,str(self.production/'bin/delivery-inspect.py'),
                                 '--media',str(output),'--phase','prepare','--format','json'])

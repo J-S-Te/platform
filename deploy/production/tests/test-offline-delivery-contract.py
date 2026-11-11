@@ -71,13 +71,22 @@ class DeliveryContract(unittest.TestCase):
         shutil.copytree(PRODUCTION, self.production, ignore=shutil.ignore_patterns(
             "runtime", "backups", "packages", "manifests", ".env", ".release.env",
             "*.pem", "*.key", "*.bak", "*.backup", "*.dump", "dump*.sql", "__pycache__", "*.pyc"))
-        for module in ("platform", "customer_and_opportunity", "contract_management", "project_management", "Settlement", "data_analysis"):
+        for module in ("platform", "customer_and_opportunity", "contract_management", "project_management", "Settlement", "data_analysis", "reimbursement"):
             for directory in ("cmd", "internal", "migrations", "authz"):
                 (self.workspace / module / directory).mkdir(parents=True, exist_ok=True)
             for name in ("Dockerfile", ".dockerignore", "go.mod", "go.sum", "docker-entrypoint.sh"):
                 source = REPO / module / name
                 if source.is_file():
                     shutil.copyfile(source, self.workspace / module / name)
+        # 原入口会真实核验会话副本；夹具必须复制全部公开源码输入，不能用成功脚本绕过门禁。
+        (self.workspace / "scripts").mkdir(parents=True, exist_ok=True)
+        for name in ("check-session-governance-sync.sh", "session-governance.sha256"):
+            shutil.copyfile(REPO / "scripts" / name, self.workspace / "scripts" / name)
+        for line in (REPO / "scripts/session-governance.sha256").read_text().splitlines():
+            _, relative = line.split()
+            destination = self.workspace / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(REPO / relative, destination)
         (self.workspace / 'platform/migrations/000001_fixture.up.sql').write_text(
             '-- Isolated compatibility input; never executed against a database.\nSELECT 1;\n')
         for directory in ("src", "public", "nginx"):

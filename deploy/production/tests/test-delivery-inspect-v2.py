@@ -262,7 +262,7 @@ class V2DeliveryTests(unittest.TestCase):
         self.write_release()
         self.assertEqual(self.result()[1], 2)
 
-    def test_six_raw_normalized_and_asset_profiles_are_all_bound(self):
+    def test_seven_raw_normalized_and_asset_profiles_are_all_bound(self):
         original = copy.deepcopy(self.v2())
         for field in ("sha256", "normalized_sha256", "policy_version"):
             self.release = copy.deepcopy(original)
@@ -386,7 +386,7 @@ func main() {
  raw, _ := io.ReadAll(os.Stdin)
  _, err := releaseintegrity.ParseManifest(raw, releaseintegrity.DefaultValidationOptions())
  components := map[string][]catalog.Component{}
- for _, app := range []string{"contract_management","customer_and_opportunity","customer_portal","data_analysis","project_management","settlement"} {
+ for _, app := range []string{"contract_management","customer_and_opportunity","customer_portal","data_analysis","project_management","reimbursement","settlement"} {
   components[app], _ = catalog.Components(app)
  }
  json.NewEncoder(os.Stdout).Encode(map[string]any{"valid":err==nil,"catalog_version":catalog.Version,"components":components})

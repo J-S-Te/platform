@@ -30,6 +30,9 @@ func p1CredentialValues(input application.SubsystemProvisioningInput, purpose, i
 // 参数：input 为登记输入，path 为运行文件，values 接收值，fresh 标识首次接入。
 // 返回值：无错误表示配置完整；否则返回配置或身份错误。
 func (provisioner *LocalDockerSubsystemProvisioner) p1LocalRuntimeValues(input application.SubsystemProvisioningInput, path string, values map[string]string, fresh bool) error {
+	if input.ApplicationCode == "reimbursement" {
+		return reimbursementLocalRuntimeValues(input, path, values, fresh)
+	}
 	if input.ApplicationCode != "contract_management" && input.ApplicationCode != "customer_portal" && input.ApplicationCode != "settlement" && input.ApplicationCode != "project_management" {
 		return nil
 	}
@@ -48,7 +51,10 @@ func (provisioner *LocalDockerSubsystemProvisioner) p1LocalRuntimeValues(input a
 		return provisioningError("read business runtime configuration")
 	}
 	if input.ApplicationCode == "project_management" {
-		return projectSettlementReferenceRuntimeValues(input, values)
+		if err := projectSettlementReferenceRuntimeValues(input, values); err != nil {
+			return err
+		}
+		return projectReimbursementRuntimeValues(input, values)
 	}
 	if input.ApplicationCode == "contract_management" {
 		if err := p1CredentialValues(input, application.ServiceCredentialSettlementContractIngest, "SETTLEMENT_INTEGRATION_CLIENT_ID", "SETTLEMENT_INTEGRATION_CLIENT_SECRET", current, values); err != nil {

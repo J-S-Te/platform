@@ -218,6 +218,9 @@ configure() (
     env_set "$runtime_file" PUBLIC_SSO_HTTP_PORT "$keycloak_port"
   fi
   public_transport_prepare "$deploy_dir" "$runtime_file" || die '公开传输配置校验失败'
+  # 部署期计算值必须落盘：编排侧用 :? 必填语法要求它们存在，任何绕过 deploy.sh 的
+  # compose 调用只读 .env，不能再回落到 localhost / Secure Cookie 默认值。
+  public_transport_persist "$runtime_file" || die '公开传输配置无法持久化到运行配置；未写入新配置'
   if [[ "$PUBLIC_HTTPS_ENABLED" == true || "$PUBLIC_TRANSPORT_STATE" == DISABLING_HTTPS ]]; then
     https_port="$PUBLIC_HTTPS_PORT"
     [[ "$https_port" != "$frontend_port" && "$https_port" != "$platform_port" && "$https_port" != "$keycloak_port" ]] || die 'HTTPS 端口不能与 HTTP、API、Keycloak 端口重复'
@@ -240,7 +243,7 @@ configure() (
   env_set "$runtime_file" OFFLINE_MONITORING_ENABLED "$monitoring"
   # 只有首次创建配置才生成关键材料；空值和缺项也可能代表既有状态，升级不得猜测。
   if [[ "$first" == true ]]; then
-    for key in MYSQL_PASSWORD MYSQL_ROOT_PASSWORD KEYCLOAK_DB_PASSWORD KEYCLOAK_DB_ROOT_PASSWORD KEYCLOAK_ADMIN_PASSWORD CONTRACT_MYSQL_PASSWORD CONTRACT_MYSQL_ROOT_PASSWORD CUSTOMER_MYSQL_PASSWORD CUSTOMER_MYSQL_ROOT_PASSWORD PORTAL_MYSQL_PASSWORD PORTAL_MYSQL_ROOT_PASSWORD PROJECT_MYSQL_PASSWORD PROJECT_MYSQL_ROOT_PASSWORD SETTLEMENT_MYSQL_PASSWORD SETTLEMENT_MYSQL_ROOT_PASSWORD DASHBOARD_MYSQL_PASSWORD DASHBOARD_MYSQL_ROOT_PASSWORD FILE_GATEWAY_DB_PASSWORD FILE_GATEWAY_DB_ROOT_PASSWORD; do env_set_generated "$runtime_file" "$key" "$(random_hex 24)" true; done
+    for key in MYSQL_PASSWORD MYSQL_ROOT_PASSWORD KEYCLOAK_DB_PASSWORD KEYCLOAK_DB_ROOT_PASSWORD KEYCLOAK_ADMIN_PASSWORD CONTRACT_MYSQL_PASSWORD CONTRACT_MYSQL_ROOT_PASSWORD CUSTOMER_MYSQL_PASSWORD CUSTOMER_MYSQL_ROOT_PASSWORD PORTAL_MYSQL_PASSWORD PORTAL_MYSQL_ROOT_PASSWORD PROJECT_MYSQL_PASSWORD PROJECT_MYSQL_ROOT_PASSWORD REIMBURSEMENT_MYSQL_PASSWORD REIMBURSEMENT_MYSQL_ROOT_PASSWORD SETTLEMENT_MYSQL_PASSWORD SETTLEMENT_MYSQL_ROOT_PASSWORD DASHBOARD_MYSQL_PASSWORD DASHBOARD_MYSQL_ROOT_PASSWORD FILE_GATEWAY_DB_PASSWORD FILE_GATEWAY_DB_ROOT_PASSWORD; do env_set_generated "$runtime_file" "$key" "$(random_hex 24)" true; done
     for key in IAM_MOBILE_ENCRYPTION_KEY IAM_BOOTSTRAP_ADMIN_PASSWORD; do env_set_generated "$runtime_file" "$key" "$(random_b64)" true; done
     env_set_generated "$runtime_file" IAM_BOOTSTRAP_TOKEN "$(random_hex 32)" true
     env_set_generated "$runtime_file" CUSTOMER_PORTAL_INITIAL_PASSWORD "$(random_hex 24)" true
@@ -248,13 +251,13 @@ configure() (
   mkdir "$staging/runtime"
   local configured_services module
   configured_services="$(docker compose --project-directory "$deploy_dir" --file "$deploy_dir/docker-compose.yml" --env-file "$runtime_file" --env-file "$staging/.release.env" config --services)" || die '统一 Compose 无法解析'
-  for runtime_name in contract customer portal project settlement data-analysis; do
+  for runtime_name in contract customer portal project reimbursement settlement data-analysis; do
     case "$runtime_name" in customer) module=customer-api ;; portal) module=portal-api ;; *) module="$runtime_name-api" ;; esac
     grep -Fxq "$module" <<< "$configured_services" || continue
     [[ ! -L "$deploy_dir/runtime/$runtime_name.env" ]] || die "拒绝符号链接运行配置：$runtime_name"
     if [[ -f "$deploy_dir/runtime/$runtime_name.env" ]]; then install -m 600 "$deploy_dir/runtime/$runtime_name.env" "$staging/runtime/$runtime_name.env"; else install -m 600 "$deploy_dir/subsystem-templates/$runtime_name.env.example" "$staging/runtime/$runtime_name.env"; fi
   done
-  for runtime_name in contract project settlement; do
+  for runtime_name in contract project reimbursement settlement; do
     [[ ! -f "$deploy_dir/runtime/$runtime_name.env" ]] || continue
     [[ ! -f "$staging/runtime/$runtime_name.env" ]] || env_set_generated "$staging/runtime/$runtime_name.env" OIDC_SESSION_ENCRYPTION_KEY_BASE64 "$(random_b64)" true
   done
@@ -304,7 +307,7 @@ configure() (
     install -m 600 "$actual_runtime" "$backup/.env"
     [[ ! -f "$release_file" ]] || install -m 600 "$release_file" "$backup/.release.env"
     mkdir "$backup/runtime"
-    for runtime_name in contract customer portal project settlement data-analysis; do [[ ! -f "$deploy_dir/runtime/$runtime_name.env" ]] || install -m 600 "$deploy_dir/runtime/$runtime_name.env" "$backup/runtime/$runtime_name.env"; done
+    for runtime_name in contract customer portal project reimbursement settlement data-analysis; do [[ ! -f "$deploy_dir/runtime/$runtime_name.env" ]] || install -m 600 "$deploy_dir/runtime/$runtime_name.env" "$backup/runtime/$runtime_name.env"; done
   fi
   install -d -m 750 "$gateway_root"
   for runtime_name in temporary quarantine; do
@@ -317,7 +320,7 @@ configure() (
   if [[ ! -f "$public" ]]; then install -m 644 "$derived" "$public"; fi
   chmod 600 "$private"; chmod 644 "$public"
   configure_firewall "$runtime_file"
-  for runtime_name in contract customer portal project settlement data-analysis; do
+  for runtime_name in contract customer portal project reimbursement settlement data-analysis; do
     [[ ! -f "$staging/runtime/$runtime_name.env" ]] || mv -f "$staging/runtime/$runtime_name.env" "$deploy_dir/runtime/$runtime_name.env"
   done
   if [[ ! -f "$release_file" ]]; then mv "$staging/.release.env" "$release_file"; fi

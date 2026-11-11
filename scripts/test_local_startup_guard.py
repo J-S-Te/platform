@@ -329,6 +329,9 @@ class DevUpTest(unittest.TestCase):
 class StartStackContractTest(unittest.TestCase):
     """up 的合同分支：已接入才发布目录并启动 contract-api/worker，否则跳过并给出接入指引。"""
 
+    # 用途：隔离执行包含报销分支的主启动函数，验证合同流程不受影响。
+    # 参数：contract_ready控制合同接入，publish_ok控制目录发布结果。
+    # 返回值：真实主函数的命令输出与退出状态。
     def run_entry(self, *, contract_ready, publish_ok=True):
         harness = HEADER + "".join([
             "frontend_public_origin=http://localhost:8081\n",
@@ -340,6 +343,8 @@ class StartStackContractTest(unittest.TestCase):
             "ensure_project_env_file() { :; }\n",
             "ensure_data_analysis_env_file() { :; }\n",
             "ensure_settlement_env_file() { :; }\n",
+            "ensure_reimbursement_env_file() { :; }\n",
+            "start_reimbursement_if_configured() { :; }\n",
             "validate_all_local_runtime_targets() { :; }\n",
             "validate_all_keycloak_runtimes() { :; }\n",
             "portal_configured() { return 1; }\n",
@@ -454,6 +459,9 @@ class RecoveryOrderTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("[跳过]", result.stdout)
 
+    # 用途：核验七个子系统都具备独立的标准探测入口。
+    # 参数：无。
+    # 返回值：无；漏项或服务映射错误时断言失败。
     def test_discovery_candidates_cover_every_subsystem(self):
         services = {}
         for line in block("subsystem_discovery_service").splitlines():
@@ -462,10 +470,10 @@ class RecoveryOrderTest(unittest.TestCase):
                 services[parts[0]] = parts[1].split("'")[1]
         self.assertEqual(sorted(services), sorted([
             "contract_management", "customer_and_opportunity", "customer_portal",
-            "project_management", "settlement", "data_analysis"]))
+            "project_management", "reimbursement", "settlement", "data_analysis"]))
         self.assertEqual(sorted(set(services.values())), sorted([
             "contract-api", "customer-api", "portal-api", "project-api",
-            "settlement-api", "dashboard-api"]))
+            "reimbursement-api", "settlement-api", "dashboard-api"]))
 
     def test_start_stack_and_core_only_both_prepare_discovery(self):
         self.assertIn("ensure_subsystem_discovery_candidates", block("start_stack"))

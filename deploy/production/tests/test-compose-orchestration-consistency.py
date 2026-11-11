@@ -519,7 +519,14 @@ class OrchestrationConsistencyTest(unittest.TestCase):
             )
             interpolation = root / ".env"
             interpolation.write_text(
-                f"BASIC_PLATFORM_RUNTIME_ENV_FILE={runtime}\n", encoding="utf-8",
+                f"BASIC_PLATFORM_RUNTIME_ENV_FILE={runtime}\n"
+                # 公开传输值由 deploy.sh 解析后写入 .env；编排侧用必填语法要求它们存在，
+                # 夹具必须像真实部署那样提供，否则 compose 解析会失败关闭。
+                "PUBLIC_PLATFORM_ORIGIN=https://platform.example.com\n"
+                "PUBLIC_SSO_ORIGIN=https://sso.example.com\n"
+                "PUBLIC_TRANSPORT_COOKIE_SECURE=true\n"
+                "PUBLIC_TRANSPORT_KEYCLOAK_REQUIRE_HTTPS=true\n",
+                encoding="utf-8",
             )
             candidate = root / "compose.json"
             candidate.write_text(json.dumps({"services": {"probe": {
@@ -636,6 +643,66 @@ class OrchestrationConsistencyTest(unittest.TestCase):
                         f"{REFERENCE} 的 {name} 环境变量 {key} 与 {CANONICAL} 矛盾："
                         f"权威 {authoritative_env[key]!r}，参考 {copied_env[key]!r}",
                     )
+
+    def test_public_transport_values_are_required_not_defaulted(self) -> None:
+        """部署期计算值必须失败关闭（现场事故回归，PUBLIC-TRANSPORT-FAILCLOSED）。
+
+        事故形态：`PUBLIC_PLATFORM_ORIGIN` / `PUBLIC_TRANSPORT_COOKIE_SECURE` 只在
+        deploy.sh 进程内 export，编排侧却写了 `${VAR:-http://localhost:8081}` /
+        `${VAR:-true}`。运维用 `docker compose --env-file .env --env-file .release.env
+        up -d --force-recreate customer-api` 刷新运行时，compose 静默取到 localhost 回跳与
+        Secure Cookie=true：明文 HTTP 下浏览器丢弃 Cookie，登录 401 死循环，全程无报错。
+
+        因此这些“部署期才能算出”的键只允许 Compose 必填语法（:?）：缺变量时 compose 直接
+        失败退出并提示由 deploy.sh configure 写入 .env。允许非回环 HTTP 会话的开关是例外：
+        它的缺省值 false 是安全方向（拒绝），保留为有意提供的安全默认值。
+        """
+        required = (
+            "PUBLIC_PLATFORM_ORIGIN",
+            "PUBLIC_SSO_ORIGIN",
+            "PUBLIC_TRANSPORT_COOKIE_SECURE",
+            "PUBLIC_TRANSPORT_KEYCLOAK_REQUIRE_HTTPS",
+        )
+        safe_default = (
+            "${PUBLIC_TRANSPORT_ALLOW_INSECURE_HTTP:-${SUBSYSTEM_ALLOW_INSECURE_HTTP_SESSION:-false}}"
+        )
+        for filename, document in ((CANONICAL, self.canonical), (REFERENCE, self.reference)):
+            services = self.services(document, filename)
+            references = {key: 0 for key in required}
+            for name, service in sorted(services.items()):
+                for key, value in sorted(environment_of(service).items()):
+                    for placeholder in required:
+                        if value.startswith("${" + placeholder + ":?"):
+                            references[placeholder] += 1
+                        with self.subTest(filename=filename, service=name, key=key):
+                            self.assertNotIn(
+                                "${" + placeholder + ":-",
+                                value,
+                                f"{filename} 的 {name}.{key} 用默认值为部署期计算值 {placeholder} 兜底："
+                                "绕过 deploy.sh 的 compose 调用会静默取到 localhost/Secure 默认值，"
+                                f"必须改成 ${{{placeholder}:?<说明>}} 并持久化到 .env",
+                            )
+                    with self.subTest(filename=filename, service=name, key=key):
+                        self.assertNotIn(
+                            "http://localhost:8081",
+                            value,
+                            f"{filename} 的 {name}.{key} 残留 localhost 兜底："
+                            "缺变量时必须失败关闭，而不是把登录回跳到本机",
+                        )
+            for placeholder, count in references.items():
+                with self.subTest(filename=filename, key=placeholder):
+                    self.assertGreater(
+                        count, 0,
+                        f"{filename} 没有任何 ${{{placeholder}:?...}} 引用：必填守卫已失去检查对象",
+                    )
+            raw = (PRODUCTION / filename).read_text(encoding="utf-8")
+            with self.subTest(filename=filename, key="ALLOW_INSECURE_HTTP"):
+                self.assertIn(
+                    safe_default,
+                    raw,
+                    f"{filename} 缺少 {safe_default}：允许非回环 HTTP 会话的键必须保留安全默认"
+                    "（缺省 false＝拒绝），不能改成必填或放宽默认值",
+                )
 
     def test_reference_never_invents_extra_runtime_env_files(self) -> None:
         """参考副本不得新增权威编排没有的 env_file（会让“照抄参考”读到不同运行配置）。"""

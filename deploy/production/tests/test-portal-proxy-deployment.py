@@ -247,7 +247,12 @@ publish_registered_customer() { echo published-fixture; }
         env = dict(os.environ, APP_TRUSTED_PROXIES=expected,
                    BASIC_PLATFORM_RUNTIME_ENV_FILE=str(ROOT / '.env.example'),
                    PLATFORM_IMAGE='fixture/platform:test', FRONTEND_IMAGE='fixture/frontend:test',
-                   FILE_GATEWAY_IMAGE='fixture/gateway:test')
+                   FILE_GATEWAY_IMAGE='fixture/gateway:test',
+                   # 模拟 configure 持久化的 HTTPS 传输结果，保持生产必填门禁。
+                   PUBLIC_PLATFORM_ORIGIN='https://platform.example.com',
+                   PUBLIC_SSO_ORIGIN='https://sso.example.com',
+                   PUBLIC_TRANSPORT_COOKIE_SECURE='true',
+                   PUBLIC_TRANSPORT_KEYCLOAK_REQUIRE_HTTPS='true')
         result = subprocess.run(['docker', 'compose', '--env-file', str(ROOT / '.env.example'),
                                  '--file', str(ROOT / 'docker-compose.yml'),
                                  'config', '--format', 'json'],

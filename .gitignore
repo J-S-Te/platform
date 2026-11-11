@@ -27,6 +27,7 @@ __pycache__/
 !docker/.env.local.example
 !docker/.env.customer.local.example
 !docker/.env.portal.local.example
+!docker/.env.reimbursement.local.example
 !docker/.env.lan.disabled
 
 # 私钥和本地凭据禁止进入版本库；公钥可以按需随代码发布。

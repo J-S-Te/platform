@@ -159,6 +159,7 @@ source "$transport_helper"
 # shellcheck source=provisioner-config-refresh.sh
 source "$provisioner_refresh_helper"
 public_transport_prepare "$deploy_dir"
+public_transport_persist "$runtime_file" || { echo '公开传输配置无法持久化到 .env，拒绝继续发布' >&2; exit 1; }
 source "$script_dir/compose-scope.sh"
 source "$script_dir/project-background.sh"
 # 即使 config --services 也会展开全部必需镜像变量。仅在提交发布指针前检查范围时使用已验证候选引用，父进程环境保持不变，以供回滚。
@@ -470,6 +471,7 @@ case "$service" in
 esac
 # 传输协调器持有同一把锁，将切换状态持久化到运行文件。等待获得锁后重新读取，防止仅服务部署因旧变量而误丢弃排空覆盖配置。
 public_transport_prepare "$deploy_dir"
+public_transport_persist "$runtime_file" || { echo '公开传输配置无法持久化到 .env，拒绝继续发布' >&2; exit 1; }
 ensure_application_network
 
 compose() {

@@ -39,6 +39,83 @@ print("说明：该标记由发布流程写入、在该服务重新部署成功�
 PY
 }
 
+# 运行中 OIDC 消费者 → 部署声明的期望环境变量，每行“服务<TAB>变量<TAB>期望值”。
+# 只列部署期才能算出、且写错就会让登录静默失败（或不安全）的键：回跳地址与 Secure Cookie 标志。
+# 其余 OIDC 字段（client id/secret/issuer）仍由各子系统 runtime/*.env 负责。
+public_transport_expected_oidc_env() {
+  local origin="$1" secure="$2"
+  printf 'platform-api\tAPP_PUBLIC_BASE_URL\t%s\n' "$origin"
+  printf 'platform-api\tAUTH_SESSION_COOKIE_SECURE\t%s\n' "$secure"
+  printf 'contract-api\tOIDC_REDIRECT_URI\t%s/contract_management/auth/callback\n' "$origin"
+  printf 'contract-api\tOIDC_SESSION_COOKIE_SECURE\t%s\n' "$secure"
+  printf 'customer-api\tOIDC_REDIRECT_URI\t%s/customer-opportunity/auth/callback\n' "$origin"
+  printf 'customer-api\tOIDC_SESSION_COOKIE_SECURE\t%s\n' "$secure"
+  printf 'portal-api\tPORTAL_OIDC_REDIRECT_URI\t%s/customer-portal/auth/callback\n' "$origin"
+  printf 'portal-api\tPORTAL_SESSION_COOKIE_SECURE\t%s\n' "$secure"
+  printf 'project-api\tOIDC_REDIRECT_URI\t%s/project_management/auth/callback\n' "$origin"
+  printf 'project-api\tOIDC_SESSION_COOKIE_SECURE\t%s\n' "$secure"
+  printf 'settlement-api\tOIDC_REDIRECT_URI\t%s/settlement/auth/callback\n' "$origin"
+  printf 'settlement-api\tOIDC_SESSION_COOKIE_SECURE\t%s\n' "$secure"
+  printf 'data-analysis-api\tOIDC_REDIRECT_URI\t%s/data_analysis/auth/callback\n' "$origin"
+  printf 'data-analysis-api\tCOOKIE_SECURE\t%s\n' "$secure"
+}
+
+# 比对“运行中容器的生效环境变量”与“本次部署声明”。每行输出：
+# 服务<TAB>变量<TAB>声明值<TAB>实际值（实际值缺失时写明 <未设置>）。
+# 返回值：一致 0；发现漂移 1；无法解析部署声明（未导出 PUBLIC_*）2。
+# 只读：仅 docker ps/inspect，不重启、不创建容器。
+public_transport_runtime_drift() {
+  local origin="${PUBLIC_PLATFORM_ORIGIN:-}" secure="${PUBLIC_TRANSPORT_COOKIE_SECURE:-}"
+  if [[ -z "$origin" || -z "$secure" ]]; then
+    printf '无法解析部署声明：PUBLIC_PLATFORM_ORIGIN=%s PUBLIC_TRANSPORT_COOKIE_SECURE=%s\n' \
+      "${origin:-<未设置>}" "${secure:-<未设置>}"
+    return 2
+  fi
+  local service key expected container environment actual drift=0
+  while IFS=$'\t' read -r service key expected; do
+    [[ -n "$service" ]] || continue
+    container="$(docker ps -q --filter "label=com.docker.compose.service=${service}" 2>/dev/null || true)"
+    container="${container%%$'\n'*}"
+    [[ -n "$container" ]] || continue
+    if ! environment="$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$container" 2>/dev/null)"; then
+      printf '%s\t%s\t%s\t<无法读取容器 %s 的环境变量>\n' "$service" "$key" "$expected" "$container"
+      drift=1
+      continue
+    fi
+    actual="$(printf '%s\n' "$environment" |
+      awk -v key="$key" 'index($0, key "=") == 1 { print substr($0, length(key) + 2); exit }')"
+    if [[ "$actual" != "$expected" ]]; then
+      printf '%s\t%s\t%s\t%s\n' "$service" "$key" "$expected" "${actual:-<未设置>}"
+      drift=1
+    fi
+  done <<< "$(public_transport_expected_oidc_env "$origin" "$secure")"
+  return "$drift"
+}
+
+# 验收门禁：运行中容器必须按当前部署声明签发回跳地址与 Secure Cookie。
+# 现场事故形态是“健康检查全绿、登录却 401 死循环”，因此这一层必须在打印成功结论之前拦下。
+verify_public_transport_consistency() {
+  local drift_output='' drift_status=0
+  drift_output="$(public_transport_runtime_drift)" || drift_status=$?
+  case "$drift_status" in
+    0)
+      printf '[验收证据] 运行中 OIDC 消费者的回跳地址与 Secure Cookie 与部署声明一致：%s（cookie_secure=%s）\n' \
+        "$PUBLIC_PLATFORM_ORIGIN" "$PUBLIC_TRANSPORT_COOKIE_SECURE"
+      return 0
+      ;;
+    2)
+      printf '[警告] 无法解析部署的公开传输声明，跳过运行态比对：%s\n' "$drift_output" >&2
+      return 0
+      ;;
+  esac
+  printf '[验收失败] 运行中容器的公开传输配置与部署声明不一致（服务/变量/声明值/实际值）：\n' >&2
+  printf '%s\n' "$drift_output" >&2
+  printf '原因：这些容器由缺失或过期的公开传输变量创建（典型是绕过 deploy.sh 的 compose up 静默取到 localhost 与 Secure Cookie=true）；健康检查不会发现，登录会 401/被踢回登录页。\n' >&2
+  printf '修复：sudo %s configure --force 重新解析并持久化，再按组件重建容器：sudo %s deploy <component>\n' \
+    "$0" "$0" >&2
+  return 1
+}
+
 status() {
   scope_report || return
   if [[ -f "$deploy_dir/runtime/first-failure.json" && ! -L "$deploy_dir/runtime/first-failure.json" ]]; then
@@ -83,7 +160,7 @@ PY
   printf '容器名称\t所属子系统\t镜像\t运行状态\t健康状态\t重启次数\t端口\n'
   docker ps -aq --filter 'name=uip' | while read -r container; do
     [[ -n "$container" ]] || continue
-    docker inspect --format '{{.Name}}\t{{index .Config.Labels "com.basic-platform.application_code"}}\t{{.Config.Image}}\t{{.State.Status}}\t{{if .State.Health}}{{.State.Health.Status}}{{else}}-{{end}}\t{{.RestartCount}}\t{{json .NetworkSettings.Ports}}' "$container"
+    docker inspect -f '{{.Name}}\t{{index .Config.Labels "com.basic-platform.application_code"}}\t{{.Config.Image}}\t{{.State.Status}}\t{{if .State.Health}}{{.State.Health.Status}}{{else}}-{{end}}\t{{.RestartCount}}\t{{json .NetworkSettings.Ports}}' "$container"
   done | sed 's#^/##'
 }
 
@@ -491,6 +568,9 @@ verify() {
   gateway_proxy_status="$(curl --silent --show-error --connect-timeout 5 --max-time 20 --output /dev/null --write-out '%{http_code}' "$PUBLIC_PLATFORM_ORIGIN/file-gateway/api/v2/upload-sessions")"
   [[ "$gateway_proxy_status" == 405 || "$gateway_proxy_status" == 401 ]] || die "File Gateway 代理未到达受保护 API（HTTP ${gateway_proxy_status}）"
   echo 'File Gateway 代理到达受保护 API；匿名请求被正确拒绝。'
+  # 登录链路的失败不会被健康检查发现：回跳地址/Secure Cookie 与部署声明不一致时必须失败关闭，
+  # 否则“容器全绿、登录 401 死循环”会一路验收通过。
+  verify_public_transport_consistency || return 1
   echo '基础平台核心服务健康检查已通过；不代表任何业务子系统已部署，也不代表外部客户端/安全组已验证。'
   if [[ -n "$component" ]]; then
     verify_subsystem_current_health "$component" || return

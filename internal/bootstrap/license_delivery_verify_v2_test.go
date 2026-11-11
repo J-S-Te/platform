@@ -143,6 +143,27 @@ func TestOfflineVerifyEnforcementRejectsLegacyOrBridgingMode(t *testing.T) {
 	}
 }
 
+// TestOfflineVerifyEnforcementRejectsStalePipelineHeartbeat 保留长流水线的当前确认门禁。
+// 参数：t为测试上下文，使用五分钟前的合成消费者确认时间。
+// 返回值：无；陈旧确认被放行或未报告许可未完成时失败。
+func TestOfflineVerifyEnforcementRejectsStalePipelineHeartbeat(t *testing.T) {
+	runner, verify, now := v2VerifyFixture(t)
+	coordinator := runner.coordinator.(v2VerifyCoordinator)
+	status := coordinator.status
+	recent := now.Add(-5 * time.Minute)
+	for index := range status.Members {
+		status.Members[index].ReadyAt = &recent
+		status.Members[index].AckAt = &recent
+	}
+	runner.coordinator = v2VerifyCoordinator{status: status}
+	if _, err := runner.verifyEnforcement(context.Background(), verify, func() time.Time { return now }); !errors.Is(err, ErrOfflineEnforcementIncomplete) {
+		t.Fatalf("长流水线必须等待消费者更新当前确认：%v", err)
+	}
+}
+
+// TestOfflineVerifyEnforcementRejectsIncompleteV2Facts 拒绝不完整或陈旧的V2许可事实。
+// 参数：t为测试上下文，各分支仅修改合成状态。
+// 返回值：无；缺确认、陈旧确认、组件缺失或内容漂移被接受时失败。
 func TestOfflineVerifyEnforcementRejectsIncompleteV2Facts(t *testing.T) {
 	for _, mutation := range []string{"missing-ack", "stale-ready", "catalog-size", "snapshot-drift"} {
 		t.Run(mutation, func(t *testing.T) {
@@ -153,6 +174,7 @@ func TestOfflineVerifyEnforcementRejectsIncompleteV2Facts(t *testing.T) {
 			case "missing-ack":
 				status.Members[0].AckAt = nil
 			case "stale-ready":
+				// 当前确认继续遵守一分钟窗口，流水线时长不能延长该门禁。
 				old := now.Add(-2 * time.Minute)
 				status.Members[0].ReadyAt = &old
 			case "catalog-size":

@@ -151,6 +151,7 @@ source "$transport_helper"
 # shellcheck source=provisioner-config-refresh.sh
 source "$provisioner_refresh_helper"
 public_transport_prepare "$deploy_dir"
+public_transport_persist "$runtime_file" || { echo '公开传输配置无法持久化到 .env，拒绝继续发布' >&2; exit 1; }
 source "$script_dir/compose-scope.sh"
 scope_services >/dev/null || exit 1
 if ! scope_enabled customer-opportunity || ! scope_enabled customer-portal; then
@@ -306,6 +307,7 @@ if ! bash "$script_dir/backup-all.sh" --if-existing --deployment-lock-fd 9; then
   exit 1
 fi
 public_transport_prepare "$deploy_dir"
+public_transport_persist "$runtime_file" || { echo '公开传输配置无法持久化到 .env，拒绝继续发布' >&2; exit 1; }
 
 # runtime 初始化、DSN 写入与后续的 .release.env 指针提交必须处于同一把
 # 发布锁内，否则 Agent 采用与人工发布并发时会生成混合版本的运行配置。

@@ -97,14 +97,14 @@ func newFixture(t *testing.T) *fixture {
 	}
 	statementBundleHash := write("attestations/platform.intoto.sigstore.json", statementBundle)
 
-	profiles := make([]Profile, 0, 6)
+	profiles := make([]Profile, 0, 7)
 	artifacts := []Artifact{
 		{Path: "payload.bin", SHA256: payloadHash, Size: int64(len("release payload")), Type: "asset"},
 		{Path: "packages/platform.tar.gz", SHA256: packageHash, Size: int64(len("immutable image package")), Type: "image-package"},
 		{Path: "attestations/platform.intoto.json", SHA256: statementHash, Size: int64(len(statement)), Type: "provenance"},
 		{Path: "attestations/platform.intoto.sigstore.json", SHA256: statementBundleHash, Size: int64(len(statementBundle)), Type: "provenance"},
 	}
-	for index := 0; index < 6; index++ {
+	for index := 0; index < 7; index++ {
 		relative := "profiles/" + string(rune('a'+index)) + ".yaml"
 		data := []byte("profile: " + relative + "\n")
 		sum := write(relative, data)
@@ -243,7 +243,7 @@ func TestVerifyMediaValid(t *testing.T) {
 	if plan.ReleaseKeyID != fixture.release.id {
 		t.Fatalf("release key id = %q", plan.ReleaseKeyID)
 	}
-	if len(plan.Profiles) != 6 || len(plan.Images) != 1 || len(plan.Applications) != 1 {
+	if len(plan.Profiles) != 7 || len(plan.Images) != 1 || len(plan.Applications) != 1 {
 		t.Fatalf("unexpected plan shape: %+v", plan)
 	}
 	if plan.Images[0].ProvenanceKeyID != fixture.build.id {

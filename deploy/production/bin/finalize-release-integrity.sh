@@ -17,7 +17,7 @@ work_dir=""
 usage() {
   cat <<'USAGE'
 用法：finalize-release-integrity.sh \
-  --media <交付目录> --spec <release-spec.json> --profiles-dir <六份运行 Profile 目录> \
+  --media <交付目录> --spec <release-spec.json> --profiles-dir <七份运行 Profile 目录> \
   --build-key <构建签名私钥> --release-key <发布签名私钥> \
   --trust-dir <释放信任目录> --verifier <release-verifier 绝对路径> [--work-dir <空目录>]
 

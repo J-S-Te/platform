@@ -1,5 +1,8 @@
 # Compose 命令包装、子命令解析与本地镜像映射查询（仅函数定义，加载零副作用）。
 
+# 用途：装配本地环境、接入profile与受控镜像覆盖后执行Compose。
+# 参数：全部参数为Compose选项与子命令。
+# 返回值：Compose退出码；固定文件不安全时拒绝执行。
 compose() {
     # macOS 自带 Bash 3.2 在 `set -u` 下展开空数组会报 unbound variable，
     # 因此不使用可选数组，而是按是否接入 Portal 显式分支。
@@ -47,6 +50,22 @@ compose() {
     if data_analysis_configured; then
         data_analysis_profile_arg="--profile data-analysis"
     fi
+    # 只把专属数据库键用于插值；完整env会覆盖其他系统的OIDC_TENANT_ID等同名键。
+    # 函数局部导出会在返回时恢复调用方环境，API/worker仍使用服务级env_file。
+    local reimbursement_runtime="${reimbursement_env_file:-${project_root}/docker/.env.reimbursement.local}"
+    local REIMBURSEMENT_MYSQL_PASSWORD REIMBURSEMENT_MYSQL_ROOT_PASSWORD
+    local reimbursement_key reimbursement_value reimbursement_profile_arg=""
+    if [[ -f "$reimbursement_runtime" && ! -L "$reimbursement_runtime" ]]; then
+        for reimbursement_key in REIMBURSEMENT_MYSQL_PASSWORD REIMBURSEMENT_MYSQL_ROOT_PASSWORD; do
+            reimbursement_value="$(env_value "$reimbursement_runtime" "$reimbursement_key")"
+            if [[ -n "$reimbursement_value" ]]; then
+                export "${reimbursement_key}=${reimbursement_value}"
+            fi
+        done
+    fi
+    if declare -F reimbursement_configured >/dev/null && reimbursement_configured; then
+        reimbursement_profile_arg="--profile reimbursement"
+    fi
     if portal_configured && project_configured; then
         docker compose \
             --project-name "$compose_project" \
@@ -58,6 +77,7 @@ compose() {
             --env-file "$project_env_file" \
             --env-file "$data_analysis_env_file" \
             --env-file "$settlement_env_file" \
+            $reimbursement_profile_arg \
             --profile portal \
             --profile project \
             --profile presale-worker \
@@ -77,6 +97,7 @@ compose() {
             --env-file "$project_env_file" \
             --env-file "$data_analysis_env_file" \
             --env-file "$settlement_env_file" \
+            $reimbursement_profile_arg \
             --profile portal \
             --profile presale-worker \
             --profile keycloak \
@@ -95,6 +116,7 @@ compose() {
             --env-file "$project_env_file" \
             --env-file "$data_analysis_env_file" \
             --env-file "$settlement_env_file" \
+            $reimbursement_profile_arg \
             --profile project \
             --profile presale-worker \
             --profile keycloak \
@@ -112,6 +134,7 @@ compose() {
         --env-file "$project_env_file" \
         --env-file "$data_analysis_env_file" \
         --env-file "$settlement_env_file" \
+        $reimbursement_profile_arg \
         --profile presale-worker \
         --profile keycloak \
         $data_analysis_profile_arg \
@@ -151,12 +174,14 @@ compose_up_wait() {
     done
 }
 
-# 只读：列出 Compose 解析出的默认本地镜像标签（不加载授权固定文件），供存在性判断使用。
-# 仅查询，不启动、不构建、不写文件。
+# 用途：只读列出包括报销在内的候选镜像标签，不加载授权固定文件。
+# 参数：无。
+# 返回值：服务与镜像标签列表；解析失败返回非零。
 compose_default_local_images() {
     COMPOSE_SKIP_LICENSE_OVERRIDE=1 compose \
         --profile bootstrap --profile customer --profile portal --profile project \
-        --profile presale-worker --profile keycloak --ansi never config --format json 2>/dev/null \
+        --profile reimbursement --profile presale-worker --profile keycloak \
+        --ansi never config --format json 2>/dev/null \
         | python3 -c '
 import json
 import sys

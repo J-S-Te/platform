@@ -26,6 +26,43 @@ def shell(body):
 
 
 class ReimbursementReviewFixes(unittest.TestCase):
+    # 用途：验证两包并存及各单包都按所属组件准备且不会交叉导入。
+    # 参数：无。
+    # 返回值：无；索引冲突或禁用组件被准备时失败。
+    def test_package_selection_keeps_components_separate(self):
+        source = (BIN / "deploy-package.sh").read_text()
+        for selected in ("reimbursement settlement data-analysis", "reimbursement", "settlement"):
+            with self.subTest(selected=selected), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                for name in ("common-infrastructure", "platform-backend-qa", "frontend-qa",
+                             "reimbursement-backend-qa", "settlement-backend-qa", "data-analysis-backend-qa"):
+                    (root / (name + "-linux-amd64.tar.gz")).touch()
+                script = '\n'.join(function(source, name) for name in
+                                   ("discover_package", "package_index", "auto_install_packages"))
+                script += f'\npackage_dir={shlex.quote(directory)}\ndeploy_dir="$package_dir/absent"\n'
+                script += f'enabled="common platform frontend {selected}"\n'
+                script += r'''
+require_initialized() { :; }
+scope_services() { :; }
+scope_report() { :; }
+scope_enabled() { [[ " $enabled " == *" $1 "* ]]; }
+workflow_enabled() { return 1; }
+temporal_consumers_enabled() { return 1; }
+wait_for_required_service_health() { :; }
+verify() { :; }
+import_package() { imported="$(basename "$1")"; }
+deploy_component() { :; }
+prepare_subsystem() { printf 'PREPARED:%s:%s\n' "$1" "$imported"; }
+die() { echo "$*" >&2; exit 7; }
+auto_install_packages
+'''
+                result = shell(script)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                prepared = [line for line in result.stdout.splitlines() if line.startswith("PREPARED:")]
+                expected = [f"PREPARED:{component}:{component}-backend-qa-linux-amd64.tar.gz"
+                            for component in selected.split()]
+                self.assertEqual(prepared, expected)
+
     # 用途：验证基础设施准备仅显式模式调用且继承已有发布锁。
     # 参数：self为隔离测试实例，helper只记录固定参数。
     # 返回值：无；默认发布触发准备或缺少能力验证时失败。

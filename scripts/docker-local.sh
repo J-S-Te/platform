@@ -25,6 +25,8 @@ data_analysis_env_file="${data_analysis_root}/.env.local"
 settlement_root="${workspace_root}/Settlement"
 settlement_template_file="${settlement_root}/.env.local.example"
 settlement_env_file="${settlement_root}/.env.local"
+reimbursement_template_file="${project_root}/docker/.env.reimbursement.local.example"
+reimbursement_env_file="${project_root}/docker/.env.reimbursement.local"
 presale_worker_env_file="${customer_root}/.env.presale-worker"
 lan_override_file="${project_root}/docker/.env.lan"
 customer_lan_override_file="${project_root}/docker/.env.customer.lan"
@@ -62,10 +64,14 @@ source "${script_dir}/local-project-background.sh"
 # base-images（依赖 log/fail）。
 source "${script_dir}/lib/env-templates.sh"
 source "${script_dir}/lib/runtime-validation.sh"
+source "${script_dir}/lib/reimbursement.sh"
 source "${script_dir}/lib/access-mode.sh"
 source "${script_dir}/lib/compose.sh"
 source "${script_dir}/lib/base-images.sh"
 
+# 用途：显示本地操作命令及各子系统的接入前提。
+# 参数：无。
+# 返回值：无；仅输出帮助文本。
 usage() {
     cat <<USAGE
 用法：
@@ -85,7 +91,7 @@ usage() {
   bash scripts/docker-local.sh dev-up            一键启动：命令行能做的全做完，需要人工决定处停下给出指令
   bash scripts/docker-local.sh dev-approve       发布运行批准（必须显式 --approve）
   bash scripts/docker-local.sh status            只读状态总览：卡在哪里、下一步做什么
-  bash scripts/docker-local.sh prepare-discovery 为六个子系统创建探测候选（不启动业务进程，失败不阻断）
+  bash scripts/docker-local.sh prepare-discovery 为七个子系统创建探测候选（不启动业务进程，失败不阻断）
   bash scripts/docker-local.sh bootstrap-admin  为已运行的控制面追加首个超级管理员（已存在则跳过）
   bash scripts/docker-local.sh build-images     只准备候选镜像：不检查旧运行镜像、不迁移、不启动服务、不改写固定记录
   bash scripts/docker-local.sh up --core-only   只恢复控制面：不执行业务迁移与业务校验，不启动业务 API/Worker
@@ -150,6 +156,8 @@ up/restart 选项：
   customer-api  客户与商机管理 API
   portal-api    客户自助门户 API（完成 customer_portal/dev 接入后启用）
   project-api   项目管理系统 API（后台由 sla-notifier 独立运行，接入后启用）
+  reimbursement-api / reimbursement-worker 报销 API 与 Worker（受控接入后启用）
+                接入模板：platform/docker/.env.reimbursement.local；迁移和目录发布由受控接入执行
   dashboard-api 数据看板与统计分析 API（嵌入桥）+ aggregation-worker + alert-worker + Metabase（未接入时先创建探测候选容器）
   presale-worker 售前申请审批/PMS 投递 Worker（up 默认启动）
 
@@ -354,6 +362,7 @@ export SETTLEMENT_RUNTIME_ENV_FILE="$settlement_env_file"
 export PORTAL_RUNTIME_ENV_FILE="$portal_env_file"
 export PROJECT_RUNTIME_ENV_FILE="$project_env_file"
 export DATA_ANALYSIS_RUNTIME_ENV_FILE="$data_analysis_env_file"
+export REIMBURSEMENT_RUNTIME_ENV_FILE="$reimbursement_env_file"
 export PRESALE_WORKER_ENV_FILE="$presale_worker_env_file"
 export BASIC_PLATFORM_HOST_PROJECT_ROOT="$project_root"
 export SUBSYSTEM_HOST_PROJECTS_ROOT="$workspace_root"
@@ -452,24 +461,30 @@ start_customer_notification_workers() {
 # 子系统探测候选：带 com.basic-platform.discovery 标签、但不启动进程的容器。
 # 平台“探测子系统”用 docker ps --all 读这些标签发现尚未接入的子系统；候选必须能被创建
 # （不启动），否则会形成“未接入不能启动、未运行不能探测”的死锁。
+# 用途：将受控应用编码映射到本地探测服务。
+# 参数：第一个参数为应用编码。
+# 返回值：标准服务名；未知应用返回1。
 subsystem_discovery_service() {
 	case "$1" in
 		contract_management) printf 'contract-api' ;;
 		customer_and_opportunity) printf 'customer-api' ;;
 		customer_portal) printf 'portal-api' ;;
 		project_management) printf 'project-api' ;;
+		reimbursement) printf 'reimbursement-api' ;;
 		settlement) printf 'settlement-api' ;;
 		data_analysis) printf 'dashboard-api' ;;
 		*) return 1 ;;
 	esac
 }
 
-# 六个子系统统一创建探测候选：不启动任何业务进程，只创建带标签的容器。
-# 单个失败不阻断其余候选；失败通常意味着该服务的运行固定镜像尚未刷新。
+# 用途：为七个子系统创建不启动的探测候选，保留已有运行容器。
+# 参数：无。
+# 返回值：0；单个候选失败时输出诊断，不中断其他候选。
 ensure_subsystem_discovery_candidates() {
 	local application="" service="" created=0 skipped=0
 	log "创建子系统探测候选（带标准标签，不启动业务进程）"
-	for application in contract_management customer_and_opportunity customer_portal project_management settlement data_analysis; do
+	for application in contract_management customer_and_opportunity customer_portal \
+		project_management reimbursement settlement data_analysis; do
 		service="$(subsystem_discovery_service "$application")" || continue
 		# 已在运行的服务容器自带同一组标准标签，探测器可直接发现；跳过候选创建。
 		# 否则 skip-override 的基础配置会因配置漂移重建运行中的容器，剥掉固定记录
@@ -903,6 +918,9 @@ sys.exit(0 if sys.argv[2] in (pinned.get("services") or {}) else 1)
 PY
 }
 
+# 用途：按需准备未登记镜像或显式构建候选，保留受控固定记录。
+# 参数：无；读取force_build与core_only选项。
+# 返回值：构建成功返回0，否则返回构建错误。
 build_images() {
     # SKIP_IMAGE_PREPARATION=1：完全离线/受限网络环境的逃生舱。调用方保证 :local 镜像
     # 已预置（离线交付包加载、镜像 retag 或预构建），此时跳过基础镜像拉取与 compose build。
@@ -917,7 +935,13 @@ build_images() {
     prepare_base_images
     # portal-api 即使尚未完成 OIDC 接入也可以安全构建；只是不应在凭据、租户和
     # 角色目录准备好之前启动。始终构建它可确保本地镜像拓扑稳定，且 Worker 与 CRM 使用同一版本。
-    local all_services=(api file-gateway contract-api contract-worker settlement-api customer-api customer-presale-alert-worker portal-api project-api sla-notifier dashboard-migrate dashboard-api aggregation-worker alert-worker frontend presale-worker presale-integration-mock)
+    # 报销四个二进制共用一个镜像，只构建一次API服务即可。
+    local all_services=(
+        api file-gateway contract-api contract-worker settlement-api customer-api
+        customer-presale-alert-worker portal-api project-api sla-notifier
+        dashboard-migrate dashboard-api aggregation-worker alert-worker frontend
+        presale-worker presale-integration-mock reimbursement-api
+    )
     if [[ "${core_only:-false}" == true ]]; then
         # 控制面单独恢复只准备控制面镜像；平台迁移与 Agent 复用 api 镜像。
         all_services=(api file-gateway frontend)
@@ -960,7 +984,9 @@ build_images() {
     # basic-platform/backend:local；CRM、Portal 和售前 Worker 使用不同 target/镜像，不会
     # 把 crm-server、portal-server 和 Worker 运行在同一个业务容器中。
     # 限制并发既降低匿名镜像令牌抖动，也避免本地机器同时编译四个后端造成资源争抢。
-    COMPOSE_PARALLEL_LIMIT=1 compose --profile bootstrap --profile customer --profile portal --profile project --profile presale-worker --ansi never build "${build_services[@]}"
+    COMPOSE_PARALLEL_LIMIT=1 compose --profile bootstrap --profile customer --profile portal \
+        --profile project --profile reimbursement --profile presale-worker \
+        --ansi never build "${build_services[@]}"
 }
 
 prepare_gateway_config() {
@@ -1008,12 +1034,22 @@ dev_approve() {
 # 独立候选构建入口：只准备本地候选镜像。不检查旧运行镜像是否存在、不执行迁移、
 # 不启动服务、不发布批准、不改写镜像固定记录。构建始终不加载授权固定文件。
 # 旧运行镜像缺失时，普通 up 会被预检阻断，因此恢复必须先经本入口准备候选。
+# 用途：准备包括报销共享后端在内的候选镜像，不执行迁移或启动。
+# 参数：无。
+# 返回值：构建成功返回0，失败返回非零。
 build_candidate_images() {
     prepare_base_images
     log "准备候选镜像：不检查旧运行镜像，不执行迁移，不启动服务，不修改批准与固定记录"
-    local all_services=(api file-gateway contract-api contract-worker settlement-api customer-api customer-presale-alert-worker portal-api project-api sla-notifier dashboard-migrate dashboard-api aggregation-worker alert-worker frontend presale-worker presale-integration-mock)
+    local all_services=(
+        api file-gateway contract-api contract-worker settlement-api customer-api
+        customer-presale-alert-worker portal-api project-api sla-notifier
+        dashboard-migrate dashboard-api aggregation-worker alert-worker frontend
+        presale-worker presale-integration-mock reimbursement-api
+    )
     # compose() 对 build 子命令始终不加载固定文件，这里与普通 up 共用同一入口。
-    COMPOSE_PARALLEL_LIMIT=1 compose --profile bootstrap --profile customer --profile portal --profile project --profile presale-worker --ansi never build "${all_services[@]}"
+    COMPOSE_PARALLEL_LIMIT=1 compose --profile bootstrap --profile customer --profile portal \
+        --profile project --profile reimbursement --profile presale-worker \
+        --ansi never build "${all_services[@]}"
     log "候选镜像已准备（服务 / 标签 / 镜像 ID）："
     local image_map="" service="" tag="" image_id=""
     image_map="$(compose_default_local_images || true)"
@@ -1365,6 +1401,9 @@ verify_gateway_routes() {
 	fi
 }
 
+# 用途：按现有接入和许可门禁启动本地栈，报销仅恢复已接入组件。
+# 参数：无；读取入口配置。
+# 返回值：全部必需步骤成功返回0，失败中止后续步骤。
 start_stack() {
     ensure_platform_env_file
     ensure_contract_env_file true
@@ -1373,6 +1412,7 @@ start_stack() {
 	ensure_project_env_file
 	ensure_data_analysis_env_file
 	ensure_settlement_env_file
+	ensure_reimbursement_env_file
 	validate_all_local_runtime_targets
 	validate_all_keycloak_runtimes
 	if portal_configured && ! portal_compensation_configured; then
@@ -1477,6 +1517,7 @@ start_stack() {
 	else
 		log "项目管理系统尚未接入，跳过 project-api；可在应用接入中创建 project_management/dev"
 	fi
+	start_reimbursement_if_configured
 	if data_analysis_configured; then
 		data_analysis_machine_credentials_configured || fail "数据看板已接入，但缺少 CONTRACT_MACHINE_* / PROJECT_MACHINE_* 分离机器凭据；请在应用接入页重新同步 data_analysis/dev，旧 MACHINE_CLIENT_* 不能替代两组新凭据"
 		data_analysis_ready=true
@@ -1944,10 +1985,11 @@ case "$command_name" in
         dev_approve "$@"
         ;;
     prepare-discovery)
-        # 优先走探测：为六个子系统创建带标签的候选容器（不启动业务进程），
+        # 优先走探测：为七个子系统创建带标签的候选容器（不启动业务进程），
         # 使界面「应用接入 → 探测子系统」可以立即发现尚未接入的子系统。
         ensure_platform_env_file
         ensure_contract_env_file true
+        ensure_reimbursement_env_file
         preflight_local_license_images
         ensure_subsystem_discovery_candidates
         ;;

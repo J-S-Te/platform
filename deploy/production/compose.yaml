@@ -46,12 +46,12 @@ x-contract-service: &contract-service
   # OIDC_* 刻意由各环境的运行配置文件管理。不要在 Compose 层添加默认值，否则会覆盖尚未迁移到 Keycloak 的环境，
   # 并让所有合同环境共用同一认证提供方。
   environment:
-    OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/contract_management/auth/callback
-    OIDC_POST_LOGOUT_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/contract_management/logged-out
-    # 传输安全默认 fail-closed（SEC-N2）：生产默认发 Secure Cookie；HTTP 过渡环境
-    # 需显式设 PUBLIC_TRANSPORT_COOKIE_SECURE=false 回滚，HTTPS overlay 不受影响。
-    OIDC_SESSION_COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-true}
-    APP_PUBLIC_URL: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/contract_management/
+    OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:?PUBLIC_PLATFORM_ORIGIN 必须由 deploy.sh configure 写入 .env}/contract_management/auth/callback
+    OIDC_POST_LOGOUT_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:?PUBLIC_PLATFORM_ORIGIN 必须由 deploy.sh configure 写入 .env}/contract_management/logged-out
+    # 传输安全 fail-closed（SEC-N2）：Secure Cookie 由 public-transport.sh 按传输状态解析，
+    # 编排侧必填（缺失即启动失败），HTTP 过渡环境下由部署脚本写入 false，HTTPS overlay 不受影响。
+    OIDC_SESSION_COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:?PUBLIC_TRANSPORT_COOKIE_SECURE 必须由 deploy.sh configure 写入 .env}
+    APP_PUBLIC_URL: ${PUBLIC_PLATFORM_ORIGIN:?PUBLIC_PLATFORM_ORIGIN 必须由 deploy.sh configure 写入 .env}/contract_management/
     HTTP_ADDRESS: :8081
     PLATFORM_BASE_URL: http://platform-api:8080
     TEMPORAL_ADDRESS: temporal:7233
@@ -75,10 +75,10 @@ x-customer-service: &customer-service
   # OIDC_* 由此应用和环境专属的 runtime/customer.env 管理。Compose 不得提供全局 Keycloak 默认值，
   # 因为已有环境仍可能使用平台签发者。
   environment:
-    APP_PUBLIC_ORIGIN: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}
-    OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/customer-opportunity/auth/callback
-    OIDC_POST_LOGOUT_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/customer-opportunity/
-    OIDC_SESSION_COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-true}
+    APP_PUBLIC_ORIGIN: ${PUBLIC_PLATFORM_ORIGIN:?PUBLIC_PLATFORM_ORIGIN 必须由 deploy.sh configure 写入 .env}
+    OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:?PUBLIC_PLATFORM_ORIGIN 必须由 deploy.sh configure 写入 .env}/customer-opportunity/auth/callback
+    OIDC_POST_LOGOUT_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:?PUBLIC_PLATFORM_ORIGIN 必须由 deploy.sh configure 写入 .env}/customer-opportunity/
+    OIDC_SESSION_COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:?PUBLIC_TRANSPORT_COOKIE_SECURE 必须由 deploy.sh configure 写入 .env}
     HTTP_ADDRESS: :8090
     PLATFORM_BASE_URL: http://platform-api:8080
     TEMPORAL_ADDRESS: ${CUSTOMER_TEMPORAL_ADDRESS:-temporal:7233}
@@ -107,10 +107,10 @@ x-portal-service: &portal-service
     - ${PORTAL_RUNTIME_ENV_FILE:-runtime/portal.env}
   # PORTAL_OIDC_* 保留在 runtime/portal.env，由认证控制面独立切换，不得继承全局值。
   environment:
-    PORTAL_PUBLIC_ORIGIN: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}
-    PORTAL_PUBLIC_URL: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/customer-portal
-    PORTAL_OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/customer-portal/auth/callback
-    PORTAL_SESSION_COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-true}
+    PORTAL_PUBLIC_ORIGIN: ${PUBLIC_PLATFORM_ORIGIN:?PUBLIC_PLATFORM_ORIGIN 必须由 deploy.sh configure 写入 .env}
+    PORTAL_PUBLIC_URL: ${PUBLIC_PLATFORM_ORIGIN:?PUBLIC_PLATFORM_ORIGIN 必须由 deploy.sh configure 写入 .env}/customer-portal
+    PORTAL_OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:?PUBLIC_PLATFORM_ORIGIN 必须由 deploy.sh configure 写入 .env}/customer-portal/auth/callback
+    PORTAL_SESSION_COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:?PUBLIC_TRANSPORT_COOKIE_SECURE 必须由 deploy.sh configure 写入 .env}
     PORTAL_HTTP_ADDRESS: :8091
     PORTAL_PLATFORM_BASE_URL: http://platform-api:8080
     PORTAL_CRM_INVITE_BASE_URL: http://customer-api:8090/customer-opportunity/api/v1
@@ -138,9 +138,9 @@ x-project-service: &project-service
     - ${PROJECT_RUNTIME_ENV_FILE:-runtime/project.env}
   # OIDC_* 只从 runtime/project.env 读取。按环境维护配置，以同时保留平台 OIDC 兼容路径和 Keycloak 迁移路径。
   environment:
-    OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/project_management/auth/callback
-    OIDC_POST_LOGOUT_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/project_management/logged-out
-    OIDC_SESSION_COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-true}
+    OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:?PUBLIC_PLATFORM_ORIGIN 必须由 deploy.sh configure 写入 .env}/project_management/auth/callback
+    OIDC_POST_LOGOUT_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:?PUBLIC_PLATFORM_ORIGIN 必须由 deploy.sh configure 写入 .env}/project_management/logged-out
+    OIDC_SESSION_COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:?PUBLIC_TRANSPORT_COOKIE_SECURE 必须由 deploy.sh configure 写入 .env}
     PM_HTTP_ADDR: :8082
     PLATFORM_BASE_URL: http://platform-api:8080
     TEMPORAL_ADDRESS: temporal:7233
@@ -161,10 +161,10 @@ x-settlement-service: &settlement-service
   env_file:
     - ${SETTLEMENT_RUNTIME_ENV_FILE:-runtime/settlement.env}
   environment:
-    SETTLEMENT_PUBLIC_ORIGIN: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}
-    OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/settlement/auth/callback
-    OIDC_POST_LOGOUT_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/settlement/
-    OIDC_SESSION_COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-true}
+    SETTLEMENT_PUBLIC_ORIGIN: ${PUBLIC_PLATFORM_ORIGIN:?PUBLIC_PLATFORM_ORIGIN 必须由 deploy.sh configure 写入 .env}
+    OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:?PUBLIC_PLATFORM_ORIGIN 必须由 deploy.sh configure 写入 .env}/settlement/auth/callback
+    OIDC_POST_LOGOUT_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:?PUBLIC_PLATFORM_ORIGIN 必须由 deploy.sh configure 写入 .env}/settlement/
+    OIDC_SESSION_COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:?PUBLIC_TRANSPORT_COOKIE_SECURE 必须由 deploy.sh configure 写入 .env}
     SETTLEMENT_HTTP_ADDR: :8085
     SETTLEMENT_DEVELOPMENT_AUTH: "false"
     PLATFORM_BASE_URL: http://platform-api:8080
@@ -180,15 +180,24 @@ x-data-analysis-service: &data-analysis-service
   env_file:
     - ${DATA_ANALYSIS_RUNTIME_ENV_FILE:-runtime/data-analysis.env}
   environment:
-    APP_PUBLIC_ORIGIN: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}
-    COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-true}
-    OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/data_analysis/auth/callback
+    APP_PUBLIC_ORIGIN: ${PUBLIC_PLATFORM_ORIGIN:?PUBLIC_PLATFORM_ORIGIN 必须由 deploy.sh configure 写入 .env}
+    COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:?PUBLIC_TRANSPORT_COOKIE_SECURE 必须由 deploy.sh configure 写入 .env}
+    OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:?PUBLIC_PLATFORM_ORIGIN 必须由 deploy.sh configure 写入 .env}/data_analysis/auth/callback
     PLATFORM_BASE_URL: http://platform-api:8080
     APP_PATH_PREFIX: /data_analysis
     GIN_MODE: release
   networks: [application]
   restart: unless-stopped
 
+# 公开传输配置（PUBLIC_PLATFORM_ORIGIN / PUBLIC_SSO_ORIGIN / PUBLIC_TRANSPORT_COOKIE_SECURE /
+# PUBLIC_TRANSPORT_KEYCLOAK_REQUIRE_HTTPS）是“部署期才能算出”的值：由 bin/public-transport.sh
+# 按 .env 的公开主机、端口与 PUBLIC_HTTPS_ENABLED 解析，并由 deploy.sh configure、
+# apply-public-transport.sh、deploy-service.sh、start-enabled.sh 持久化回 .env。
+# 因此这里一律使用 Compose 必填语法（:?），缺变量时 `docker compose up` 直接失败退出，
+# 绝不静默回落到 http://localhost:8081 或 Secure Cookie=true。现场事故即为反面样本：绕过
+# deploy.sh 的 compose up 让 OIDC 回跳指向 localhost、并在明文 HTTP 下发出 Secure Cookie，
+# 浏览器丢弃 Cookie 后登录陷入 401 死循环，且没有任何报错。回退到别的取值只能靠重跑受控脚本，
+# 或显式在 .env 中声明这些键（--env-file .env 一直被发布脚本使用）。
 services:
   # 生产统一登录入口。Keycloak 使用独立数据库，不连接或修改现有业务数据库。
   # Keycloak 与业务 MySQL 分库、分卷。HTTP/TLS 由 KEYCLOAK_* 和入口网关共同决定，
@@ -230,7 +239,7 @@ services:
       # 可选的 bootstrap service account 必须成对配置；空值注入会让 Keycloak 26
       # 在启动期直接失败（client id 已设置但 secret 为空）。需要启用时把完整的
       # KC_BOOTSTRAP_ADMIN_CLIENT_ID/SECRET 写入 keycloak 的专用 env_file。
-      KC_HOSTNAME: ${PUBLIC_SSO_ORIGIN:-${KEYCLOAK_PUBLIC_URL:?KEYCLOAK_PUBLIC_URL must be configured}}
+      KC_HOSTNAME: ${PUBLIC_SSO_ORIGIN:?PUBLIC_SSO_ORIGIN 必须由 deploy.sh configure 写入 .env}
       KC_HOSTNAME_STRICT: ${KEYCLOAK_HOSTNAME_STRICT:-true}
       KC_PROXY_HEADERS: ${KEYCLOAK_PROXY_HEADERS:-xforwarded}
       KC_HTTP_ENABLED: ${KEYCLOAK_HTTP_ENABLED:-true}
@@ -319,18 +328,18 @@ services:
       LICENSE_RUNTIME_PLATFORM_BASE_URL: http://platform-api:8080
       LICENSE_RUNTIME_PUBLIC_KEY_PATH: /app/data/keys/jwt-ed25519-public.pem
       LICENSE_RUNTIME_STATE_DIRECTORY: /var/lib/commercial-license
-      APP_PUBLIC_BASE_URL: ${PUBLIC_PLATFORM_ORIGIN:-${APP_PUBLIC_BASE_URL:-http://localhost:8081}}
-      APP_CORS_ALLOWED_ORIGINS: ${PUBLIC_PLATFORM_ORIGIN:-${APP_CORS_ALLOWED_ORIGINS:-http://localhost:8081}}
-      AUTH_SESSION_COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-${AUTH_SESSION_COOKIE_SECURE:-true}}
+      APP_PUBLIC_BASE_URL: ${PUBLIC_PLATFORM_ORIGIN:?PUBLIC_PLATFORM_ORIGIN 必须由 deploy.sh configure 写入 .env}
+      APP_CORS_ALLOWED_ORIGINS: ${PUBLIC_PLATFORM_ORIGIN:?PUBLIC_PLATFORM_ORIGIN 必须由 deploy.sh configure 写入 .env}
+      AUTH_SESSION_COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:?PUBLIC_TRANSPORT_COOKIE_SECURE 必须由 deploy.sh configure 写入 .env}
       # 传输安全默认 fail-closed（SEC-N2）：Secure Cookie 与 Keycloak HTTPS 必需默认开启，
       # 任意 HTTP 回调 URI 默认拒绝。回滚方式（仅限已评估的 HTTP 过渡环境，在 .env 显式设置）：
       #   PUBLIC_TRANSPORT_COOKIE_SECURE=false、PUBLIC_TRANSPORT_KEYCLOAK_REQUIRE_HTTPS=false、
       #   PUBLIC_TRANSPORT_ALLOW_INSECURE_HTTP=true。
       # compose.https.yaml overlay 加载时由 public-transport.sh 统一给出上述 PUBLIC_TRANSPORT_* 值，覆盖能力保持不变。
       AUTH_OAUTH_CLIENT_ALLOW_INSECURE_HTTP_REDIRECT_URIS: ${PUBLIC_TRANSPORT_ALLOW_INSECURE_HTTP:-${AUTH_OAUTH_CLIENT_ALLOW_INSECURE_HTTP_REDIRECT_URIS:-false}}
-      OIDC_ISSUER: ${PUBLIC_PLATFORM_ORIGIN:-${OIDC_ISSUER:-http://localhost:8081}}
-      KEYCLOAK_PUBLIC_URL: ${PUBLIC_SSO_ORIGIN:-${KEYCLOAK_PUBLIC_URL:-http://localhost:18090}}
-      KEYCLOAK_REQUIRE_HTTPS: ${PUBLIC_TRANSPORT_KEYCLOAK_REQUIRE_HTTPS:-${KEYCLOAK_REQUIRE_HTTPS:-true}}
+      OIDC_ISSUER: ${PUBLIC_PLATFORM_ORIGIN:?PUBLIC_PLATFORM_ORIGIN 必须由 deploy.sh configure 写入 .env}
+      KEYCLOAK_PUBLIC_URL: ${PUBLIC_SSO_ORIGIN:?PUBLIC_SSO_ORIGIN 必须由 deploy.sh configure 写入 .env}
+      KEYCLOAK_REQUIRE_HTTPS: ${PUBLIC_TRANSPORT_KEYCLOAK_REQUIRE_HTTPS:?PUBLIC_TRANSPORT_KEYCLOAK_REQUIRE_HTTPS 必须由 deploy.sh configure 写入 .env}
       # 信任来源收敛为精确网关地址（SEC-N6，与生产 .env.example 保持一致）：
       # 新环境默认网关为 172.31.255.1、frontend 为 172.31.255.250；既有网络由 CI
       # 按真实网关与 FRONTEND_IPV4_ADDRESS 收敛为 /32。应用网段其余容器一律不可信，
@@ -415,12 +424,12 @@ services:
       SUBSYSTEM_PLATFORM_COMPOSE_PROJECT: ${COMPOSE_PROJECT_NAME:-basic-platform-production}
       SUBSYSTEM_DOCKER_BINARY: docker
       SUBSYSTEM_ONBOARDING_TIMEOUT: 15m
-      APP_PUBLIC_BASE_URL: ${PUBLIC_PLATFORM_ORIGIN:-${APP_PUBLIC_BASE_URL:-http://localhost:8081}}
-      APP_CORS_ALLOWED_ORIGINS: ${PUBLIC_PLATFORM_ORIGIN:-${APP_CORS_ALLOWED_ORIGINS:-http://localhost:8081}}
-      AUTH_SESSION_COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-${AUTH_SESSION_COOKIE_SECURE:-true}}
-      OIDC_ISSUER: ${PUBLIC_PLATFORM_ORIGIN:-${OIDC_ISSUER:-http://localhost:8081}}
-      KEYCLOAK_PUBLIC_URL: ${PUBLIC_SSO_ORIGIN:-${KEYCLOAK_PUBLIC_URL:-http://localhost:18090}}
-      KEYCLOAK_REQUIRE_HTTPS: ${PUBLIC_TRANSPORT_KEYCLOAK_REQUIRE_HTTPS:-${KEYCLOAK_REQUIRE_HTTPS:-true}}
+      APP_PUBLIC_BASE_URL: ${PUBLIC_PLATFORM_ORIGIN:?PUBLIC_PLATFORM_ORIGIN 必须由 deploy.sh configure 写入 .env}
+      APP_CORS_ALLOWED_ORIGINS: ${PUBLIC_PLATFORM_ORIGIN:?PUBLIC_PLATFORM_ORIGIN 必须由 deploy.sh configure 写入 .env}
+      AUTH_SESSION_COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:?PUBLIC_TRANSPORT_COOKIE_SECURE 必须由 deploy.sh configure 写入 .env}
+      OIDC_ISSUER: ${PUBLIC_PLATFORM_ORIGIN:?PUBLIC_PLATFORM_ORIGIN 必须由 deploy.sh configure 写入 .env}
+      KEYCLOAK_PUBLIC_URL: ${PUBLIC_SSO_ORIGIN:?PUBLIC_SSO_ORIGIN 必须由 deploy.sh configure 写入 .env}
+      KEYCLOAK_REQUIRE_HTTPS: ${PUBLIC_TRANSPORT_KEYCLOAK_REQUIRE_HTTPS:?PUBLIC_TRANSPORT_KEYCLOAK_REQUIRE_HTTPS 必须由 deploy.sh configure 写入 .env}
       AUDIT_ENVIRONMENT_CODE: prod
       BASIC_PLATFORM_RUN_WORKER_WITH_API: "false"
       # 出网策略（task-50 SEC-B5）：与 platform-api 同源注入——上游全为 compose 私网
@@ -657,10 +666,10 @@ services:
       - license-state-contract-api:/var/lib/commercial-license
       - ${PLATFORM_KEYS_DIR:-./data/platform/keys}/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
     environment:
-      OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/contract_management/auth/callback
-      OIDC_POST_LOGOUT_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/contract_management/logged-out
-      OIDC_SESSION_COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-true}
-      APP_PUBLIC_URL: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/contract_management/
+      OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:?PUBLIC_PLATFORM_ORIGIN 必须由 deploy.sh configure 写入 .env}/contract_management/auth/callback
+      OIDC_POST_LOGOUT_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:?PUBLIC_PLATFORM_ORIGIN 必须由 deploy.sh configure 写入 .env}/contract_management/logged-out
+      OIDC_SESSION_COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:?PUBLIC_TRANSPORT_COOKIE_SECURE 必须由 deploy.sh configure 写入 .env}
+      APP_PUBLIC_URL: ${PUBLIC_PLATFORM_ORIGIN:?PUBLIC_PLATFORM_ORIGIN 必须由 deploy.sh configure 写入 .env}/contract_management/
       HTTP_ADDRESS: :8081
       PLATFORM_BASE_URL: http://platform-api:8080
       TEMPORAL_ADDRESS: temporal:7233
@@ -1012,9 +1021,9 @@ services:
     # YAML merge 不递归合并 environment：声明本块会整体替换 anchor 的同名映射，
     # 因此这里重复列出 anchor 的键，并补上权威编排中的 DASHBOARD_TIMEZONE。
     environment:
-      APP_PUBLIC_ORIGIN: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}
-      COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-true}
-      OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/data_analysis/auth/callback
+      APP_PUBLIC_ORIGIN: ${PUBLIC_PLATFORM_ORIGIN:?PUBLIC_PLATFORM_ORIGIN 必须由 deploy.sh configure 写入 .env}
+      COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:?PUBLIC_TRANSPORT_COOKIE_SECURE 必须由 deploy.sh configure 写入 .env}
+      OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:?PUBLIC_PLATFORM_ORIGIN 必须由 deploy.sh configure 写入 .env}/data_analysis/auth/callback
       PLATFORM_BASE_URL: http://platform-api:8080
       APP_PATH_PREFIX: /data_analysis
       GIN_MODE: release
@@ -1095,9 +1104,9 @@ services:
     # 缺失时 alert-worker 启动失败（fail-closed），不会带着占位租户写错租户的告警。
     # 告警生命周期收敛（BIZ-DATA-07）默认 false；开关只在 Compose 插值来源 .env 生效。
     environment:
-      APP_PUBLIC_ORIGIN: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}
-      COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:-true}
-      OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}/data_analysis/auth/callback
+      APP_PUBLIC_ORIGIN: ${PUBLIC_PLATFORM_ORIGIN:?PUBLIC_PLATFORM_ORIGIN 必须由 deploy.sh configure 写入 .env}
+      COOKIE_SECURE: ${PUBLIC_TRANSPORT_COOKIE_SECURE:?PUBLIC_TRANSPORT_COOKIE_SECURE 必须由 deploy.sh configure 写入 .env}
+      OIDC_REDIRECT_URI: ${PUBLIC_PLATFORM_ORIGIN:?PUBLIC_PLATFORM_ORIGIN 必须由 deploy.sh configure 写入 .env}/data_analysis/auth/callback
       PLATFORM_BASE_URL: http://platform-api:8080
       APP_PATH_PREFIX: /data_analysis
       GIN_MODE: release
@@ -1140,7 +1149,7 @@ services:
       MB_DB_USER: dashboard
       MB_DB_PASS: ${DASHBOARD_MYSQL_PASSWORD:-PENDING_DASHBOARD_MYSQL_PASSWORD}
       MB_JAVA_TIMEZONE: Asia/Shanghai
-      MB_SITE_URL: ${PUBLIC_PLATFORM_ORIGIN:-${DATA_ANALYSIS_PUBLIC_ORIGIN:-http://localhost:8081}}/data_analysis
+      MB_SITE_URL: ${PUBLIC_PLATFORM_ORIGIN:?PUBLIC_PLATFORM_ORIGIN 必须由 deploy.sh configure 写入 .env}/data_analysis
     depends_on:
       data-analysis-mysql:
         condition: service_healthy

@@ -20,6 +20,7 @@ COMPONENT_APP = {
     "customer-portal": "customer_portal",
     "contract": "contract_management",
     "project": "project_management",
+    "reimbursement": "reimbursement",
     "settlement": "settlement",
     "data-analysis": "data_analysis",
 }

@@ -143,6 +143,7 @@ start_registered() (
 start_enabled() {
   require_initialized
   public_transport_prepare "$deploy_dir" "$runtime_file"
+  public_transport_persist "$runtime_file" || { echo '公开传输配置无法持久化到 .env，拒绝继续启动' >&2; return 1; }
   scope_services >/dev/null || return
   scope_report || return
   local component platform_image gateway_image frontend_image

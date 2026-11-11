@@ -132,7 +132,7 @@ func runAttestations(args []string) error {
 	flags.SetOutput(os.Stderr)
 	media := flags.String("media", "", "read-only release media directory")
 	specPath := flags.String("spec", "", "release spec JSON")
-	profilesDir := flags.String("profiles-dir", "", "directory with exactly six production profiles")
+	profilesDir := flags.String("profiles-dir", "", "directory with exactly seven production profiles")
 	planOutput := flags.String("plan-output", "", "write attestation signing plan outside the media")
 	candidate := flags.Bool("candidate", false, "allow an unsigned candidate when formal signing is unavailable")
 	if err := flags.Parse(args); err != nil {
@@ -201,7 +201,7 @@ func runManifest(args []string) error {
 	flags.SetOutput(os.Stderr)
 	media := flags.String("media", "", "read-only release media directory")
 	specPath := flags.String("spec", "", "release spec JSON")
-	profilesDir := flags.String("profiles-dir", "", "directory with exactly six production profiles")
+	profilesDir := flags.String("profiles-dir", "", "directory with exactly seven production profiles")
 	planOutput := flags.String("plan-output", "", "write release signing plan outside the media")
 	candidate := flags.Bool("candidate", false, "allow an unsigned candidate when formal signing is unavailable")
 	if err := flags.Parse(args); err != nil {
@@ -430,22 +430,22 @@ func installProfiles(sourceDir, mediaDir string) ([]releaseintegrity.Profile, er
 	if err != nil {
 		return nil, fmt.Errorf("无法读取 profiles 目录")
 	}
-	names := make([]string, 0, 6)
+	names := make([]string, 0, 7)
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".yaml") {
 			continue
 		}
 		names = append(names, entry.Name())
 	}
-	if len(names) != 6 {
-		return nil, fmt.Errorf("profiles 目录必须恰好包含六份 .yaml，实际 %d", len(names))
+	if len(names) != 7 {
+		return nil, fmt.Errorf("profiles 目录必须恰好包含七份 .yaml，实际 %d", len(names))
 	}
 	sort.Strings(names)
 	targetDir := filepath.Join(mediaDir, "profiles")
 	if err := os.MkdirAll(targetDir, 0o700); err != nil {
 		return nil, fmt.Errorf("无法创建 profiles 目录")
 	}
-	profiles := make([]releaseintegrity.Profile, 0, 6)
+	profiles := make([]releaseintegrity.Profile, 0, 7)
 	for _, name := range names {
 		source := filepath.Join(sourceDir, name)
 		info, err := os.Lstat(source)

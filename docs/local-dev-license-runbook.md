@@ -158,3 +158,13 @@ bash scripts/docker-local.sh prepare-license --application <应用编码> --oper
 ### 7.5 项目后台状态自愈
 
 `runtime/project-background/operation.json` 停在 `activating/prepared/teardown-drained` 且后台容器已随整体停机消失时，`up` 会先把状态文件**归档**（`*.stale.<UTC时间>`，保留证据）再重新准备，避免"无法重新证明排空"导致整栈起不来。运行中或容器仍存在时不做任何处理。
+
+### 7.6 报销本地许可准备
+
+本地组件清单已包含 `reimbursement`，API 与 worker 使用两个独立组件身份和状态卷；
+`reimbursement-migrate` 单独记录迁移镜像，不计为第三个运行消费者。
+准备器支持七应用清单，仍要求实际镜像具有不可变 ID、版本和许可协议标签。
+
+`prepare-local-runtime-license.py --application reimbursement --operator <标识>` 默认只生成
+未审核候选。是否发布批准及后续受控更新继续遵循上述流程；本地源码、候选生成或
+单元测试均不代表已导入商业 JWS、完成自然 ACK 或达到 ENFORCED。

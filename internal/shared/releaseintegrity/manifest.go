@@ -260,8 +260,8 @@ func validateArtifacts(artifacts []Artifact) error {
 }
 
 func validateProfiles(profiles []Profile) error {
-	if len(profiles) != 6 {
-		return fail(CodeComponentSetMismatch, "发布清单必须覆盖六份原始 profile，实际 %d", len(profiles))
+	if len(profiles) != 7 {
+		return fail(CodeComponentSetMismatch, "发布清单必须覆盖七份原始 profile，实际 %d", len(profiles))
 	}
 	seen := make(map[string]bool, len(profiles))
 	for _, profile := range profiles {

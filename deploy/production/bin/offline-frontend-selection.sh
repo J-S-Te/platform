@@ -23,6 +23,7 @@ offline_frontend_enabled_modules() {
     case "$token" in
       contract|contract_management|contract-management) code=contract_management ;;
       project|project_management|project-management) code=project_management ;;
+      reimbursement) code=reimbursement ;;
       settlement|settlement_and_invoicing|settlement-invoicing) code=settlement ;;
       customer-opportunity|customer_and_opportunity) code=customer_and_opportunity ;;
       customer-portal|customer_portal) code=customer_portal ;;
@@ -33,7 +34,7 @@ offline_frontend_enabled_modules() {
   done
   # 只有显式本地发行免除CRM依赖；运行来源仍须首次安装时受控选择。
   [[ "$mode" == local || "$selected" != *' customer_portal '* ]] || selected="${selected}customer_and_opportunity "
-  for code in project_management settlement contract_management customer_and_opportunity customer_portal data_analysis; do
+  for code in project_management settlement contract_management customer_and_opportunity customer_portal data_analysis reimbursement; do
     [[ "$selected" != *" $code "* ]] || output="${output}${output:+,}$code"
   done
   printf '%s\n' "${output:-none}"
@@ -52,7 +53,7 @@ offline_bind_build_arguments() {
 offline_frontend_manifest_codes() {
   local selection="$1"
   if [[ "$selection" == all ]]; then
-    selection='project_management,settlement,contract_management,customer_and_opportunity,customer_portal,data_analysis'
+    selection='project_management,settlement,contract_management,customer_and_opportunity,customer_portal,data_analysis,reimbursement'
   elif [[ "$selection" == none ]]; then
     selection=''
   fi

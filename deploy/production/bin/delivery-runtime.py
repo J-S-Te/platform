@@ -24,7 +24,7 @@ DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 VERSION = re.compile(r"[A-Za-z0-9._-]+\Z")
 COMPONENTS = {
     "common", "platform", "frontend", "customer-opportunity", "customer-portal",
-    "contract", "project", "settlement", "data-analysis",
+    "contract", "project", "reimbursement", "settlement", "data-analysis",
 }
 INDEX_TYPES = {
     "application/vnd.oci.image.index.v1+json",

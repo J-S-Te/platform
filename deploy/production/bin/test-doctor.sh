@@ -28,13 +28,53 @@ mock_container_release=''
 mock_cat_available=true
 mock_sha256sum_available=true
 docker_mutations="$test_root/docker-mutations.log"
+# 运行中 OIDC 消费者夹具：服务=容器ID 与容器生效环境变量。
+mock_service_containers="$test_root/mock-service-containers"
+mock_oidc_env="$test_root/mock-oidc-env"
 
-public_transport_prepare() { :; }
+# 公开传输解析替身：复现 ip 模式的解析结果（origin 省略默认端口；SSO 用 KEYCLOAK_HTTP_PORT），
+# 让“持久化值 vs 解析值”和“容器实际值 vs 部署声明”都有确定期望，不连真实 Docker。
+public_transport_prepare() {
+  local host http_port keycloak_port https_enabled
+  host="$(env_get "$runtime_file" PUBLIC_PLATFORM_HOST)"
+  http_port="$(env_get "$runtime_file" PUBLIC_HTTP_PORT)"
+  keycloak_port="$(env_get "$runtime_file" KEYCLOAK_HTTP_PORT)"
+  https_enabled="$(env_get "$runtime_file" PUBLIC_HTTPS_ENABLED)"
+  [[ -n "$host" && -n "$http_port" && -n "$keycloak_port" ]] || return 1
+  if [[ "$https_enabled" == true ]]; then
+    PUBLIC_PLATFORM_ORIGIN="https://${host}"
+    PUBLIC_SSO_ORIGIN="https://${host}"
+    PUBLIC_TRANSPORT_COOKIE_SECURE=true
+    PUBLIC_TRANSPORT_ALLOW_INSECURE_HTTP=false
+    PUBLIC_TRANSPORT_KEYCLOAK_REQUIRE_HTTPS=true
+  else
+    PUBLIC_PLATFORM_ORIGIN="http://${host}:${http_port}"
+    PUBLIC_SSO_ORIGIN="http://${host}:${keycloak_port}"
+    PUBLIC_TRANSPORT_COOKIE_SECURE=false
+    PUBLIC_TRANSPORT_ALLOW_INSECURE_HTTP=true
+    PUBLIC_TRANSPORT_KEYCLOAK_REQUIRE_HTTPS=false
+  fi
+}
 compose() { return 0; }
 docker() {
   case "$1" in
     ps)
       [[ "$2" == -q ]] || return 97
+      if [[ "${3:-}" == --filter ]]; then
+        case "${4:-}" in
+          label=com.docker.compose.service=subsystem-provisioner|name=uip-subsystem-provisioner)
+            [[ "$mock_provisioner" == true ]] && printf 'provisioner-id\n'
+            return 0
+            ;;
+          label=com.docker.compose.service=*)
+            # 只回答 OIDC 消费者的 label 查询；没有夹具容器时输出为空（等同于未启动）。
+            [[ -f "$mock_service_containers" ]] || return 0
+            awk -F= -v key="${4#label=com.docker.compose.service=}" '$1 == key { print $2; exit }' \
+              "$mock_service_containers"
+            return 0
+            ;;
+        esac
+      fi
       [[ "$mock_provisioner" == true ]] && printf 'provisioner-id\n'
       return 0
       ;;
@@ -43,8 +83,16 @@ docker() {
       case "$3" in
         '{{.Name}}') printf '/uip-subsystem-provisioner\n' ;;
         *'Config.Env'*)
-          printf 'SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT=%s\n' "${mock_container_path%/.release.env}"
-          printf 'SUBSYSTEM_PRODUCTION_RELEASE_ENV_PATH=%s\n' "$mock_container_path"
+          case "${4:-}" in
+            oidc-*)
+              # OIDC 消费者夹具：文件内容即容器生效的公开传输环境变量。
+              [[ -f "$mock_oidc_env" ]] && cat "$mock_oidc_env"
+              ;;
+            *)
+              printf 'SUBSYSTEM_PRODUCTION_HOST_DEPLOY_ROOT=%s\n' "${mock_container_path%/.release.env}"
+              printf 'SUBSYSTEM_PRODUCTION_RELEASE_ENV_PATH=%s\n' "$mock_container_path"
+              ;;
+          esac
           ;;
         *'Mounts'*) printf '%s|%s\n' "$release_file" "$mock_container_path" ;;
         *'StartedAt'*) printf '2025-01-01T00:00:00Z\n' ;;
@@ -122,6 +170,9 @@ reset_green() {
   rm -rf "$deploy_dir"
   mkdir -p "$manifest_dir" "$package_dir" "$deploy_dir/runtime" "$deploy_dir/subsystems.d"
   printf 'OFFLINE_CONFIGURATION_COMPLETE=true\nPUBLIC_ACCESS_MODE=ip\nPUBLIC_PLATFORM_HOST=192.0.2.20\nPUBLIC_SSO_HOST=192.0.2.20\nPUBLIC_HTTP_PORT=8081\nKEYCLOAK_HTTP_PORT=18090\n' > "$runtime_file"
+  # 公开传输值必须已持久化：编排（compose）用必填语法要求它们存在，部署脚本负责写入。
+  printf 'PUBLIC_PLATFORM_ORIGIN=http://192.0.2.20:8081\nPUBLIC_SSO_ORIGIN=http://192.0.2.20:18090\n' >> "$runtime_file"
+  printf 'PUBLIC_TRANSPORT_COOKIE_SECURE=false\nPUBLIC_TRANSPORT_ALLOW_INSECURE_HTTP=true\nPUBLIC_TRANSPORT_KEYCLOAK_REQUIRE_HTTPS=false\n' >> "$runtime_file"
   # 旧 Secret 退役策略必须显式出现在夹具里：缺失会让 doctor 报警告，全绿用例就不成立。
   printf 'AUTH_OAUTH_CLIENT_SECRET_PREVIOUS_RETIREMENT=keep\nAUTH_OAUTH_CLIENT_SECRET_PREVIOUS_GRACE=24h\n' >> "$runtime_file"
   chmod 600 "$runtime_file"
@@ -137,6 +188,12 @@ reset_green() {
   mock_cat_available=true
   mock_sha256sum_available=true
   sync_container_release
+  # 运行中 OIDC 消费者：与上面的部署声明一致，全绿场景不应报漂移。
+  printf 'customer-api=oidc-customer\n' > "$mock_service_containers"
+  {
+    printf 'OIDC_REDIRECT_URI=http://192.0.2.20:8081/customer-opportunity/auth/callback\n'
+    printf 'OIDC_SESSION_COOKIE_SECURE=false\n'
+  } > "$mock_oidc_env"
   rm -f "$docker_mutations"
 }
 
@@ -405,5 +462,68 @@ run_doctor
 expect_rc 0
 expect_log '[警告] AUTH_OAUTH_CLIENT_SECRET_PREVIOUS_GRACE=30d 不是合法的 Go duration'
 reject_log '[失败]'
+
+# ---------------------------------------------------------------------------
+# 8. 公开传输一致性（现场事故类）：缺失/过期的持久化值、运行中容器漂移都必须失败关闭，
+#    并给出可执行修复命令；健康检查永远不会发现这类故障（表现为登录 401 死循环）。
+# ---------------------------------------------------------------------------
+# 8.1 关键值未持久化：裸 compose 会因必填变量缺失而失败，doctor 必须提前指出并给修复命令。
+reset_green
+drop_runtime_key PUBLIC_PLATFORM_ORIGIN
+run_doctor
+expect_rc 1
+expect_log '[失败] PUBLIC_PLATFORM_ORIGIN 未持久化到 .env'
+expect_log 'configure --force'
+expect_log '存在阻断问题'
+
+# 8.2 持久化值与当前解析值不一致（改过 IP/端口或 HTTPS 开关后未重跑 configure）。
+reset_green
+env_set "$runtime_file" PUBLIC_PLATFORM_ORIGIN 'http://192.0.2.99:8081'
+env_set "$runtime_file" PUBLIC_TRANSPORT_COOKIE_SECURE 'true'
+run_doctor
+expect_rc 1
+expect_log '[失败] PUBLIC_PLATFORM_ORIGIN 在 .env 中是 http://192.0.2.99:8081，当前配置解析为 http://192.0.2.20:8081'
+expect_log '[失败] PUBLIC_TRANSPORT_COOKIE_SECURE 在 .env 中是 true，当前配置解析为 false'
+expect_log 'configure --force'
+
+# 8.3 运行中容器仍用旧声明（绕过 deploy.sh 的 compose up 留下的错值）：必须报漂移并点名组件。
+reset_green
+{
+  printf 'OIDC_REDIRECT_URI=http://localhost:8081/customer-opportunity/auth/callback\n'
+  printf 'OIDC_SESSION_COOKIE_SECURE=true\n'
+} > "$mock_oidc_env"
+run_doctor
+expect_rc 1
+expect_log '[失败] 运行中容器 customer-api 的 OIDC_REDIRECT_URI=http://localhost:8081/customer-opportunity/auth/callback，与部署声明 http://192.0.2.20:8081/customer-opportunity/auth/callback 不一致'
+expect_log '[失败] 运行中容器 customer-api 的 OIDC_SESSION_COOKIE_SECURE=true，与部署声明 false 不一致'
+expect_log 'deploy customer-opportunity'
+expect_log 'configure --force'
+[[ ! -e "$docker_mutations" ]] || { cat "$docker_mutations" >&2; fail 'doctor issued a container mutation while comparing transport env'; }
+
+# 8.4 允许非回环 HTTP 会话的开关在编排侧保留安全默认：缺失只提示（不误判为阻断）。
+reset_green
+drop_runtime_key PUBLIC_TRANSPORT_ALLOW_INSECURE_HTTP
+run_doctor
+expect_rc 0
+expect_log '[警告] PUBLIC_TRANSPORT_ALLOW_INSECURE_HTTP 未持久化到 .env'
+expect_log '未发现阻断问题，但有'
+reject_log '[失败]'
+
+# 8.5 HTTPS 部署的声明同样参与比对：Secure Cookie=true 才是一致（不能因改协议而漏判）。
+reset_green
+env_set "$runtime_file" PUBLIC_HTTPS_ENABLED true
+env_set "$runtime_file" PUBLIC_PLATFORM_ORIGIN 'https://192.0.2.20'
+env_set "$runtime_file" PUBLIC_SSO_ORIGIN 'https://192.0.2.20'
+env_set "$runtime_file" PUBLIC_TRANSPORT_COOKIE_SECURE true
+env_set "$runtime_file" PUBLIC_TRANSPORT_ALLOW_INSECURE_HTTP false
+env_set "$runtime_file" PUBLIC_TRANSPORT_KEYCLOAK_REQUIRE_HTTPS true
+{
+  printf 'OIDC_REDIRECT_URI=https://192.0.2.20/customer-opportunity/auth/callback\n'
+  printf 'OIDC_SESSION_COOKIE_SECURE=false\n'
+} > "$mock_oidc_env"
+run_doctor
+expect_rc 1
+expect_log '[失败] 运行中容器 customer-api 的 OIDC_SESSION_COOKIE_SECURE=false，与部署声明 true 不一致'
+expect_log 'deploy customer-opportunity'
 
 echo 'doctor read-only environment self-check tests passed'

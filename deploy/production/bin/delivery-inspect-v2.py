@@ -19,6 +19,7 @@ CATALOG = {
     "customer_portal": ("portal-api", "portal-report-worker", "portal-invite-compensation-worker"),
     "data_analysis": ("data-analysis-api", "data-analysis-aggregation-worker", "data-analysis-alert-worker", "data-analysis-metabase"),
     "project_management": ("project-api", "project-sla-notifier"),
+    "reimbursement": ("reimbursement-api", "reimbursement-worker"),
     "settlement": ("settlement-api", "settlement-worker"),
 }
 HEX = re.compile(r"[0-9a-f]{64}\Z")
@@ -207,7 +208,7 @@ def validate(inspection, image_module, profiles, app_components):
 
     profile_paths = {"profiles/" + filename: app for app, filename in profiles.items()}
     observed_profiles = set()
-    for profile in sequence(value["profiles"], 6):
+    for profile in sequence(value["profiles"], 7):
         fields(profile, {"path", "sha256", "normalized_sha256", "policy_version"})
         path = profile["path"]
         if not isinstance(path, str) or path not in profile_paths or path in observed_profiles or integer(profile["policy_version"]) != 1:
@@ -219,7 +220,7 @@ def validate(inspection, image_module, profiles, app_components):
             raise Invalid("raw/normalized release profile differs from the deployment asset profile")
         observed_profiles.add(path)
     if observed_profiles != set(profile_paths):
-        raise Invalid("release must bind exactly six production profiles")
+        raise Invalid("release must bind exactly seven production profiles")
 
     packages = {package["archive"]: package for package in inspection.packages.values()}
     images = {}
@@ -253,7 +254,7 @@ def validate(inspection, image_module, profiles, app_components):
         images[name] = image
 
     applications = set()
-    for application in sequence(value["applications"], 6):
+    for application in sequence(value["applications"], 7):
         fields(application, {"code", "environment", "components"})
         app = application["code"]
         if not isinstance(app, str) or app not in protocols or app in applications or application["environment"] != "prod":

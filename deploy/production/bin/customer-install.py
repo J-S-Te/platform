@@ -578,7 +578,7 @@ def deploy_verified(root, config, args, target, work, media, verifier, trust):
 def finish_ready_adoptions(target, session):
     if session.get("current_stage") != "controlled" or session.get("overall_status") != "WAITING":
         return False
-    allowed = {"customer-opportunity", "customer-portal", "contract", "project", "settlement", "data-analysis"}
+    allowed = {"customer-opportunity", "customer-portal", "contract", "project", "reimbursement", "settlement", "data-analysis"}
     deployer = safe_path(target / "bin/deploy.sh")
     changed = False
     for component in session.get("identity", {}).get("components", []):

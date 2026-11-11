@@ -27,7 +27,7 @@ func (provisioner *LocalDockerSubsystemProvisioner) AvailableCapabilities(ctx co
 	if info, err := os.Stat(provisioner.config.GatewayScriptPath); err != nil || !info.Mode().IsRegular() || strings.TrimSpace(provisioner.config.GatewayIncludePath) == "" {
 		return capabilities, nil
 	}
-	for _, code := range []string{integratedContractApplicationCode, integratedCustomerApplicationCode, integratedPortalApplicationCode, integratedProjectApplicationCode, integratedSettlementApplicationCode, "data_analysis"} {
+	for _, code := range []string{integratedContractApplicationCode, integratedCustomerApplicationCode, integratedPortalApplicationCode, integratedProjectApplicationCode, integratedSettlementApplicationCode, "data_analysis", "reimbursement"} {
 		if err := ctx.Err(); err != nil {
 			return application.SubsystemProvisioningCapabilities{}, err
 		}

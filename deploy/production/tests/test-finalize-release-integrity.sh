@@ -41,7 +41,7 @@ json.dump({
     "formal_signing_allowed": True,
 }, open(path, "w", encoding="utf-8"), separators=(",", ":"))
 PY
-for index in a b c d e f; do printf 'profile: %s\n' "$index" > "$profiles/$index.yaml"; done
+for index in a b c d e f g; do printf 'profile: %s\n' "$index" > "$profiles/$index.yaml"; done
 python3 - "$media/spec.json" <<'PY'
 import json, sys
 json.dump({
@@ -84,7 +84,7 @@ bash "$deploy/bin/finalize-release-integrity.sh" \
   --trust-dir "$work/trust" --verifier "$work/release-verifier"
 [[ -f "$media/release-manifest.json" && -f "$media/release-manifest.sigstore.json" ]]
 [[ -d "$media/attestations" && -f "$media/attestations/platform.intoto.sigstore.json" ]]
-[[ -f "$media/profiles/a.yaml" && -f "$media/profiles/f.yaml" ]]
+[[ -f "$media/profiles/a.yaml" && -f "$media/profiles/g.yaml" ]]
 "$work/release-verifier" verify --media "$media" --trust-dir "$work/trust" --output json | grep -q '"status": "VERIFIED"'
 python3 - "$media/release-manifest.json" <<'PY'
 import json, sys
