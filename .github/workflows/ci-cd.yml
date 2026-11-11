@@ -246,6 +246,8 @@ jobs:
         run: sh scripts/license-core-sync.sh --check
       - name: Verify license-core sync guard
         run: sh scripts/license-core-sync-test.sh
+      - name: Verify controlled license-core vendor synchronization
+        run: python3 -B scripts/test_license_core_vendor_sync.py
 
   # 迁移 SQL 全量验证（此前是最大盲区）。现状事实：migrations/ 有 140 个 SQL，
   # migrations/*_test.go 依赖 9 个不同的 *_TEST_DSN，但 test job 的 MySQL 8.0 service

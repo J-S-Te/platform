@@ -1817,7 +1817,8 @@ func (provisioner *LocalDockerSubsystemProvisioner) executeIntegratedPlatformCom
 	if err != nil {
 		return nil, err
 	}
-	reimbursementEnvironment, err := integratedRuntimeEnvironment(filepath.Join(platformRoot, "docker", ".env.reimbursement.local"), required["reimbursement"])
+	reimbursementEnvironment, reimbursementInterpolation, err := reimbursementComposeEnvironment(
+		filepath.Join(platformRoot, "docker", ".env.reimbursement.local"), required["reimbursement"])
 	if err != nil {
 		return nil, err
 	}
@@ -1840,7 +1841,6 @@ func (provisioner *LocalDockerSubsystemProvisioner) executeIntegratedPlatformCom
 		"--env-file", portalEnvironment,
 		"--env-file", projectEnvironment,
 		"--env-file", settlementEnvironment,
-		"--env-file", reimbursementEnvironment,
 		"--env-file", analysisEnvironment,
 		"-f", composeFile,
 	}
@@ -1867,6 +1867,9 @@ func (provisioner *LocalDockerSubsystemProvisioner) executeIntegratedPlatformCom
 		"DATA_ANALYSIS_SUBSYSTEM_ENVIRONMENT": {},
 		"SETTLEMENT_SUBSYSTEM_ENVIRONMENT":    {},
 		"REIMBURSEMENT_SUBSYSTEM_ENVIRONMENT": {},
+		"REIMBURSEMENT_MYSQL_PASSWORD":        {},
+		"REIMBURSEMENT_MYSQL_ROOT_PASSWORD":   {},
+		"REIMBURSEMENT_RUNTIME_ENV_FILE":      {},
 	}
 	workerEnvironment, err := integratedRuntimeEnvironment(
 		filepath.Join(platformRoot, "docker", ".env.portal-report-worker.local"), required["portal_report"])
@@ -1880,6 +1883,7 @@ func (provisioner *LocalDockerSubsystemProvisioner) executeIntegratedPlatformCom
 	}
 	runnerEnvironment := make([]string, 0, len(os.Environ())+12)
 	runnerEnvironment = append(runnerEnvironment, "PORTAL_REPORT_WORKER_RUNTIME_ENV_FILE="+workerEnvironment)
+	runnerEnvironment = append(runnerEnvironment, reimbursementInterpolation...)
 	for _, entry := range os.Environ() {
 		key, _, ok := strings.Cut(entry, "=")
 		if ok {
