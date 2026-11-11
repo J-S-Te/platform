@@ -240,6 +240,9 @@ func TestV1UploadAppliesEveryPurposePolicy(t *testing.T) {
 			if files.uploaded.Namespace != item.Namespace || files.uploaded.Purpose != item.Purpose {
 				t.Fatalf("upload input namespace/purpose = %q/%q, want %q/%q", files.uploaded.Namespace, files.uploaded.Purpose, item.Namespace, item.Purpose)
 			}
+			if item.Classification != "" && files.uploaded.Classification != item.Classification {
+				t.Fatal("purpose classification was downgraded")
+			}
 			if files.uploaded.PolicyVersion != v2PolicyVersion || files.uploaded.RetentionClass != v1PolicyExpectedRetention(item) {
 				t.Fatalf("upload input policy = %q/%q, want %q/%q", files.uploaded.PolicyVersion, files.uploaded.RetentionClass, v2PolicyVersion, v1PolicyExpectedRetention(item))
 			}
@@ -341,6 +344,9 @@ func TestV1AndV2UploadsResolveSamePurposePolicy(t *testing.T) {
 				t.Fatal("v2 CreateSession did not insert an upload session")
 			}
 			stored := statementArgumentText(sessions[len(sessions)-1])
+			if item.Classification != "" && !strings.Contains(stored, item.Classification) {
+				t.Fatal("v2 purpose classification was downgraded")
+			}
 			for _, expected := range []string{item.Namespace, item.Purpose, v2PolicyVersion} {
 				if !strings.Contains(stored, expected) {
 					t.Fatalf("v2 session lost policy value %q: args = %s", expected, stored)

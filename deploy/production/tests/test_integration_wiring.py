@@ -112,6 +112,7 @@ UPDATE_CREDENTIAL_SUFFIXES = {
         FILE_GATEWAY_SUFFIX,
     ),
     "settlement": (
+        "reimbursement-cost",
         "audit-publisher",
         "notification-publisher",
         "owner-directory",

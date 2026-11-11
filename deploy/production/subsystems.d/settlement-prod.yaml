@@ -5,7 +5,7 @@ default: false
 application:
   code: settlement
   initial_admin_roles: [settlement_admin]
-  allowed_service_bindings: [file_gateway_write, owner_directory_read, notification_ingest, settlement_project_reference_read, crm_credit_payment_ingest]
+  allowed_service_bindings: [settlement_reimbursement_cost_read, file_gateway_write, owner_directory_read, notification_ingest, settlement_project_reference_read, crm_credit_payment_ingest]
   name: 结算与开票管理系统
   description: 应收、回款核销、开票与催收管理系统
   environment: prod
@@ -24,6 +24,10 @@ runtime:
       generated_keys:
         - OIDC_SESSION_ENCRYPTION_KEY_BASE64
       values:
+        SETTLEMENT_REIMBURSEMENT_COST_ENABLED: "true"
+        SETTLEMENT_REIMBURSEMENT_COST_URL: http://reimbursement-api:8087/internal/v1/settlement/cost-candidates
+        SETTLEMENT_REIMBURSEMENT_COST_TOKEN_URL: http://platform-api:8080/oauth2/token
+        SETTLEMENT_REIMBURSEMENT_COST_SCOPE: reimbursement.cost_candidate.read
         SETTLEMENT_INTEGRATION_ENABLED: "true"
         CONTRACT_INTEGRATION_AUDIENCE: basic-platform-application
         PLATFORM_MACHINE_TOKEN_PUBLIC_KEY_PATH: /app/data/keys/jwt-ed25519-public.pem
@@ -71,6 +75,10 @@ runtime:
         SETTLEMENT_HANDOVER_PUBLIC_KEY_PATH: /app/data/keys/jwt-ed25519-public.pem
         SETTLEMENT_HANDOVER_CALLER_ENVIRONMENT_CODE: prod
       bindings:
+        SETTLEMENT_REIMBURSEMENT_COST_CLIENT_ID: service.settlement_reimbursement_cost_read.client_id
+        SETTLEMENT_REIMBURSEMENT_COST_CLIENT_SECRET: service.settlement_reimbursement_cost_read.client_secret
+        SETTLEMENT_REIMBURSEMENT_COST_TENANT_ID: tenant_id
+        SETTLEMENT_REIMBURSEMENT_COST_ENVIRONMENT: environment
         SETTLEMENT_DASHBOARD_MACHINE_ENABLED: settlement_dashboard_enabled
         SETTLEMENT_DASHBOARD_MACHINE_UNAVAILABLE_REASON: settlement_dashboard_unavailable_reason
         SETTLEMENT_DASHBOARD_MACHINE_CLIENT_ID: related_service.data_analysis.settlement_dashboard_read.client_id

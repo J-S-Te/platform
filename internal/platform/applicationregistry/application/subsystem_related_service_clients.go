@@ -59,6 +59,13 @@ func (resolver *RelatedServiceClientsResolver) ResolveWithPolicy(ctx context.Con
 		}
 		return append(result, dashboard...), nil
 	}
+	if applicationCode == "reimbursement" {
+		cost, err := resolver.resolveReimbursementCostSource(ctx, tenantID, environment)
+		if err != nil {
+			return nil, err
+		}
+		return append(result, cost...), nil
+	}
 	if applicationCode != "project_management" {
 		return result, err
 	}

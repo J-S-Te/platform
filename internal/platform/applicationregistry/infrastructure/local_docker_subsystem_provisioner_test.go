@@ -1837,6 +1837,7 @@ func p1FixtureProvisioningInput(input application.SubsystemProvisioningInput) ap
 		input.ServiceCredentials = append(input.ServiceCredentials, application.SubsystemServiceCredential{Purpose: application.ServiceCredentialSettlementContractIngest, PlaintextSecret: "settlement-source-test-secret", OAuthClient: application.OAuthClientView{ID: "contract-source-client", TenantID: input.TenantID, ApplicationID: input.ApplicationID, EnvironmentID: input.EnvironmentID, ClientID: "contract_management-" + input.Environment + "-settlement-integration", Status: "ACTIVE", ClientType: "service", TokenAuthMethod: "client_secret_basic", GrantTypes: []string{"client_credentials"}, Scopes: []string{"settlement.contract.ingest"}}})
 	}
 	if input.ApplicationCode == "settlement" {
+		input.ServiceCredentials = append(input.ServiceCredentials, costSenderFixtureCredential(input))
 		for purpose, scope := range map[string]string{
 			application.ServiceCredentialSettlementProjectReferenceRead: "settlement.project_reference.read",
 			application.ServiceCredentialOwnerDirectoryRead:             "owner_directory.read",

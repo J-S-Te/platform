@@ -69,6 +69,7 @@ const (
 	ServiceCredentialContractDashboardRead              = "contract_dashboard_read"
 	ServiceCredentialProjectDashboardRead               = "project_dashboard_read"
 	ServiceCredentialSettlementDashboardRead            = "settlement_dashboard_read"
+	ServiceCredentialSettlementReimbursementCostRead    = "settlement_reimbursement_cost_read"
 	ServiceCredentialContractApprovedRead               = "contract_approved_read"
 	ServiceCredentialProjectContractImport              = "project_contract_import"
 	ServiceCredentialReimbursementProjectReferenceRead  = "reimbursement_project_reference_read"
@@ -730,6 +731,7 @@ var integratedServicePurposeRegistry = map[string]integratedServicePurposeDefini
 	ServiceCredentialCRMOpportunityImportProvision:      {ServiceCredentialCRMOpportunityImportProvision, "crm-opportunity-import-provision", "CRM Opportunity Import Provisioner", "opportunity.import_provision"},
 	ServiceCredentialContractDashboardRead:              {ServiceCredentialContractDashboardRead, "contract-dashboard", "Contract Dashboard Reader", "dashboard.contract.read"},
 	ServiceCredentialProjectDashboardRead:               {ServiceCredentialProjectDashboardRead, "project-dashboard", "Project Dashboard Reader", "dashboard.project.read"},
+	ServiceCredentialSettlementReimbursementCostRead:    {ServiceCredentialSettlementReimbursementCostRead, "reimbursement-cost", "Settlement Reimbursement Cost Reader", "reimbursement.cost_candidate.read"},
 	ServiceCredentialSettlementDashboardRead:            {ServiceCredentialSettlementDashboardRead, "settlement-dashboard", "Settlement Dashboard Reader", "dashboard.settlement.read"},
 	ServiceCredentialContractApprovedRead:               {ServiceCredentialContractApprovedRead, "contract-approved-reader", "Approved Contract Reader", "contract.approved.internal.read"},
 	ServiceCredentialProjectContractImport:              {ServiceCredentialProjectContractImport, "project-integration", "Project Contract Importer", "project.contract.import"},
@@ -770,7 +772,7 @@ func hardcodedIntegratedServicePurposes(applicationCode string) []string {
 	case "settlement", "settlement_and_invoicing":
 		// 信用同步是结算的回款/冲销事实回流能力：默认创建用途客户端但由结算
 		// SETTLEMENT_CRM_CREDIT_SYNC_ENABLED 控制是否启用，避免启用时才发现平台无用途。
-		return []string{ServiceCredentialSettlementProjectReferenceRead, ServiceCredentialCRMCreditPaymentIngest, ServiceCredentialOwnerDirectoryRead, ServiceCredentialNotificationIngest}
+		return []string{ServiceCredentialSettlementReimbursementCostRead, ServiceCredentialSettlementProjectReferenceRead, ServiceCredentialCRMCreditPaymentIngest, ServiceCredentialOwnerDirectoryRead, ServiceCredentialNotificationIngest}
 	case "data_analysis":
 		return []string{ServiceCredentialContractDashboardRead, ServiceCredentialProjectDashboardRead, ServiceCredentialContractImportReportRead, ServiceCredentialSettlementDashboardRead}
 	case integratedProjectApplicationCode:

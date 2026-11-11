@@ -8,6 +8,7 @@ var SubsystemUpdateP1Purposes = []string{
 	ServiceCredentialReimbursementProjectReferenceRead, ServiceCredentialProjectReimbursementCostWrite,
 	ServiceCredentialContractImportReportRead,
 	ServiceCredentialSettlementDashboardRead,
+	ServiceCredentialSettlementReimbursementCostRead,
 	ServiceCredentialAnalysisContractImportReportStatus,
 	ServiceCredentialSettlementProjectReferenceRead,
 	ServiceCredentialSettlementContractIngest,

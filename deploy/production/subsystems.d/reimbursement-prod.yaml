@@ -20,6 +20,11 @@ runtime:
       required_existing_keys: []
       generated_keys: [OIDC_SESSION_ENCRYPTION_KEY_BASE64]
       values:
+        REIMBURSEMENT_COST_MACHINE_AUDIENCE: basic-platform-application
+        REIMBURSEMENT_COST_MACHINE_ISSUER: basic-platform
+        REIMBURSEMENT_COST_MACHINE_PUBLIC_KEY_PATH: /app/data/keys/jwt-ed25519-public.pem
+        REIMBURSEMENT_COST_MACHINE_CALLER_APPLICATION_CODE: settlement
+        REIMBURSEMENT_COST_MACHINE_REQUIRED_SCOPE: reimbursement.cost_candidate.read
         HTTP_ADDRESS: :8087
         MYSQL_DSN: 'reimbursement:${REIMBURSEMENT_MYSQL_PASSWORD}@tcp(reimbursement-mysql:3306)/reimbursement?parseTime=true&charset=utf8mb4&loc=UTC'
         PLATFORM_BASE_URL: http://platform-api:8080
@@ -30,6 +35,13 @@ runtime:
         OIDC_SESSION_COOKIE_NAME: reimbursement_session
         REIMBURSEMENT_AUDIT_REQUIRED: "true"
       bindings:
+        REIMBURSEMENT_COST_MACHINE_ENABLED: reimbursement_cost_enabled
+        REIMBURSEMENT_COST_MACHINE_CLIENT_ID: related_service.settlement.settlement_reimbursement_cost_read.client_id
+        REIMBURSEMENT_COST_MACHINE_OAUTH_CLIENT_ID: related_service.settlement.settlement_reimbursement_cost_read.oauth_client_id
+        REIMBURSEMENT_COST_MACHINE_APPLICATION_ID: related_service.settlement.settlement_reimbursement_cost_read.application_id
+        REIMBURSEMENT_COST_MACHINE_ENVIRONMENT_ID: related_service.settlement.settlement_reimbursement_cost_read.environment_id
+        REIMBURSEMENT_COST_MACHINE_CALLER_ENVIRONMENT_CODE: environment
+        REIMBURSEMENT_COST_MACHINE_TENANT_ID: tenant_id
         PUBLIC_BASE_URL: public_url_no_trailing_slash
         PLATFORM_ENVIRONMENT_CODE: environment
         CENTRAL_SESSION_ENABLED: central_session_enabled

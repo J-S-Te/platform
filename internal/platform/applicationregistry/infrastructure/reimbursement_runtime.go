@@ -130,7 +130,7 @@ func reimbursementLocalRuntimeValues(input application.SubsystemProvisioningInpu
 
 	values["PUBLIC_BASE_URL"] = strings.TrimRight(input.PublicURL, "/")
 	values["FILE_GATEWAY_SCOPE"] = "platform:file:upload platform:file:bind platform:file:download"
-	return nil
+	return reimbursementCostRuntimeValues(input, values)
 }
 
 // reimbursementLocalSecrets 保留已交付数据库与会话材料，初装时生成独立随机值。

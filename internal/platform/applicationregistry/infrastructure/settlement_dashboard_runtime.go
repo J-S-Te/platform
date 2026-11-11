@@ -111,6 +111,7 @@ func dataAnalysisSettlementRuntimeValues(input application.SubsystemProvisioning
 	values["SETTLEMENT_MACHINE_TOKEN_SCOPE"] = "dashboard.settlement.read"
 	values["SETTLEMENT_FINANCE_URL"] = "http://settlement-api:8085/internal/v1/dashboard/finance"
 	values["PROJECT_REPORT_URL"] = "http://project-api:8082/internal/v1/dashboard/reports"
+	values["METRIC_FACTS_SYNC_ENABLED"] = "true"
 	preserveDataAnalysisDashboardSources(input.ApplicationCode, current, values)
 	return nil
 }
@@ -137,14 +138,14 @@ func dataAnalysisDashboardRuntimeValues(input application.SubsystemProvisioningI
 	return dataAnalysisSettlementRuntimeValues(input, current, values)
 }
 
-// preserveDataAnalysisDashboardSources 保留运维明确选择的报告与财务来源URL。
+// preserveDataAnalysisDashboardSources 保留运维明确选择的来源URL和新指标启停。
 // 参数：code为接收应用，current为受控现值，values为本次默认配置。
 // 返回值：无；显式空URL也表示未接入，不能被更新静默启用。
 func preserveDataAnalysisDashboardSources(code string, current, values map[string]string) {
 	if code != "data_analysis" {
 		return
 	}
-	for _, key := range []string{"PROJECT_REPORT_URL", "SETTLEMENT_FINANCE_URL"} {
+	for _, key := range []string{"PROJECT_REPORT_URL", "SETTLEMENT_FINANCE_URL", "METRIC_FACTS_SYNC_ENABLED"} {
 		if value, exists := current[key]; exists {
 			values[key] = value
 		}
