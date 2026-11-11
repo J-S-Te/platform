@@ -205,6 +205,16 @@ func offlineCurrentPurchase(state domain.State, environment string, now time.Tim
 	return apps, nil
 }
 
+// offlineHeartbeatTolerance 是消费者 READY/ACK 心跳被判定为"当前"的最大年龄。
+//
+// 升级流水线从业务镜像暂存走到最终授权验收通常需要数分钟，而各消费组件的
+// READY/ACK 只在暂存/重建时产生一次。用 60 秒窗口会在长流水线里必然失败，
+// 且失败原因与真实问题（快照陈旧、修订不一致）无法区分。
+//
+// 真正的门禁是修订一致（IssuedRevision/AckRevision == 应用修订）与快照内容摘要
+// （SnapshotCurrent），这里的窗口只用于排除"拿上一批次的旧心跳冒充当前确认"。
+const offlineHeartbeatTolerance = 10 * time.Minute
+
 func offlineEnforcementStatus(state domain.State, app string, status coordination.Status, specs []coordination.ServiceSpec, verify offlineSnapshotVerification, now time.Time) error {
 	failure := func() error {
 		return fmt.Errorf("%w: %s requires the full approved current snapshot and fresh consumer ACKs", ErrOfflineEnforcementIncomplete, app)
@@ -225,7 +235,7 @@ func offlineEnforcementStatus(state domain.State, app string, status coordinatio
 			return failure()
 		}
 		for _, heartbeat := range []*time.Time{member.ReadyAt, member.AckAt} {
-			if heartbeat.IsZero() || now.Sub(*heartbeat) > time.Minute || heartbeat.After(now.Add(time.Second)) {
+			if heartbeat.IsZero() || now.Sub(*heartbeat) > offlineHeartbeatTolerance || heartbeat.After(now.Add(time.Second)) {
 				return failure()
 			}
 		}
@@ -320,7 +330,7 @@ func offlineEnforcementStatusV2(state domain.State, app string, status coordinat
 		}
 		// V2 的 image/coverage 只保留为诊断字段，不是商业授权等值门槛。
 		for _, heartbeat := range []*time.Time{member.ReadyAt, member.AckAt} {
-			if heartbeat.IsZero() || now.Sub(*heartbeat) > time.Minute || heartbeat.After(now.Add(time.Second)) {
+			if heartbeat.IsZero() || now.Sub(*heartbeat) > offlineHeartbeatTolerance || heartbeat.After(now.Add(time.Second)) {
 				return failure()
 			}
 		}

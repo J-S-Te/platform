@@ -5,6 +5,7 @@ import "strings"
 // SubsystemUpdateP1Purposes 是需要严格校验（租户/类型/认证方式/授权类型）的用途集合。
 // 与既有实现一致：这些用途由平台侧集成使用，凭据漂移会直接导致集成失败。
 var SubsystemUpdateP1Purposes = []string{
+	ServiceCredentialReimbursementProjectReferenceRead, ServiceCredentialProjectReimbursementCostWrite,
 	ServiceCredentialContractImportReportRead,
 	ServiceCredentialAnalysisContractImportReportStatus,
 	ServiceCredentialSettlementProjectReferenceRead,
@@ -24,6 +25,8 @@ func RequiresStrictSubsystemUpdateServiceClientValidation(applicationCode, purpo
 		}
 	}
 	switch strings.ToLower(strings.TrimSpace(applicationCode)) {
+	case "reimbursement":
+		return normalizedPurpose == ServiceCredentialOwnerDirectoryRead || normalizedPurpose == ServiceCredentialNotificationIngest || normalizedPurpose == ServiceCredentialAuditIngest || normalizedPurpose == ServiceCredentialFileGatewayWrite
 	case "settlement", "settlement_and_invoicing":
 		return normalizedPurpose == ServiceCredentialOwnerDirectoryRead ||
 			normalizedPurpose == ServiceCredentialNotificationIngest ||

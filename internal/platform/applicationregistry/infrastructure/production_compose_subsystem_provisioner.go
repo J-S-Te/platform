@@ -668,6 +668,7 @@ func (target *productionComposeTarget) deployLocked(ctx context.Context, redactV
 			return target.subsystemServiceFailure(ctx, "start production subsystem dependencies", compose.DependencyServices, redactValues)
 		}
 	}
+	backupVerified := false
 	if compose.Database != nil {
 		target.stepLog("step=backup database=%s", compose.Database.Name)
 		backupName := target.config.Profile.Manifest.Application.Code + "-onboarding-" + time.Now().UTC().Format("20060102T150405.000000000Z") + ".sql"
@@ -696,6 +697,7 @@ func (target *productionComposeTarget) deployLocked(ctx context.Context, redactV
 			return provisioningError("handoff production subsystem backup ownership")
 		}
 		target.stepLog("step=backup-complete recovery_directory=%s.backup", backupName)
+		backupVerified = true
 	}
 	if err := target.prepareProjectBackground(ctx); err != nil {
 		return provisioningError("pause/drain project background before migration; operation retained")
@@ -723,7 +725,15 @@ func (target *productionComposeTarget) deployLocked(ctx context.Context, redactV
 		// 运维才能在页面错误摘要之外继续用 docker ps -a / docker logs 诊断。
 		// 成功时只精确删除本次容器，不会误删先前保留的失败现场。
 		migrationContainer := productionMigrationContainerName(target.config.Profile.Manifest.Application.Code)
-		if output, err := target.runComposeOutput(ctx, "run", "--name", migrationContainer, "--no-deps", compose.MigrateService); err != nil {
+		migrationArgs := []string{"run", "--name", migrationContainer, "--no-deps", compose.MigrateService}
+		if target.config.Profile.Manifest.Application.Code == "reimbursement" {
+			var err error
+			migrationArgs, err = reimbursementMigrationArguments(migrationContainer, compose.MigrateService, backupVerified)
+			if err != nil {
+				return err
+			}
+		}
+		if output, err := target.runComposeOutput(ctx, migrationArgs...); err != nil {
 			detail := sanitizeProvisioningLog(string(output), redactValues)
 			if detail == "" {
 				return provisioningError("migrate production subsystem database; failed container retained as " + migrationContainer)
@@ -1113,7 +1123,7 @@ func (target *productionComposeTarget) writeRuntimeFixedValues(input application
 					return resolveErr
 				}
 				values[key] = value
-			case "tenant_id", "application_id", "application_code", "environment", "authorization_context_url":
+			case "reimbursement_integration_enabled", "tenant_id", "application_id", "application_code", "environment", "authorization_context_url":
 				value, resolveErr := resolveProductionBinding(input, source)
 				if resolveErr != nil {
 					return resolveErr
@@ -1297,6 +1307,9 @@ func (target *productionComposeTarget) writeRuntimeConfiguration(input applicati
 // 参数：input 为目标环境及已登记凭据，source 为清单绑定来源。
 // 返回值：绑定值；身份不匹配或来源不受支持时返回错误。
 func resolveProductionBinding(input application.SubsystemProvisioningInput, source string) (string, error) {
+	if source == "reimbursement_integration_enabled" || strings.HasPrefix(source, reimbursementRelatedPrefix) {
+		return resolveReimbursementReceiverBinding(input, source)
+	}
 	if strings.HasPrefix(source, "related_service.settlement.settlement_project_reference_read.") {
 		return resolveSettlementReferenceIdentity(input, source)
 	}

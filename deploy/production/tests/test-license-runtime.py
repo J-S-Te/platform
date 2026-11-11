@@ -107,6 +107,18 @@ class LicenseRuntimeGateTests(unittest.TestCase):
         # 证据只允许出现实例前缀，不允许出现完整实例标识或许可原文。
         self.assertNotIn(INSTANCE, result.stdout + result.stderr)
 
+    def test_reimbursement_is_discovered_and_checked(self):
+        """报销是第 7 个商业应用：必须进入自动发现集合，不能被未知应用过滤成假绿。"""
+        containers = [container("reimbursement-api", "reimbursement")] + platform_containers()
+        result = self.run_gate(self.fixture(containers=containers,
+                                            verify={"reimbursement": {"exit_code": 0}}), "--json")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        evidence = json.loads(result.stdout)
+        self.assertEqual([item["application"] for item in evidence["applications"]], ["reimbursement"])
+        self.assertEqual(evidence["applications"][0]["name"], "报销管理系统")
+        self.assertEqual(evidence["applications"][0]["verify_deployment"], "passed")
+        self.assertEqual(evidence["failures"], [])
+
     def test_json_evidence_reports_masked_instance(self):
         result = self.run_gate(self.fixture(), "--json")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

@@ -93,7 +93,14 @@ runtime:
         FILE_GATEWAY_BASE_URL: http://file-gateway:8086
         FILE_GATEWAY_ENABLED: "true"
         FILE_GATEWAY_SCOPE: platform:file:upload platform:file:bind platform:file:download
+        REIMBURSEMENT_MACHINE_AUDIENCE: basic-platform-application
+        REIMBURSEMENT_MACHINE_ISSUER: basic-platform
+        REIMBURSEMENT_MACHINE_PUBLIC_KEY_PATH: /app/data/keys/jwt-ed25519-public.pem
       bindings:
+        REIMBURSEMENT_INTEGRATION_ENABLED: reimbursement_integration_enabled
+        REIMBURSEMENT_REFERENCE_CLIENT_ID: related_service.reimbursement.reimbursement_project_reference_read.client_id
+        REIMBURSEMENT_SPEND_CLIENT_ID: related_service.reimbursement.project_reimbursement_cost_write.client_id
+        REIMBURSEMENT_MACHINE_CALLER_ENVIRONMENT_CODE: environment
         SETTLEMENT_REFERENCE_CALLER_ENVIRONMENT_CODE: environment
         CENTRAL_SESSION_ENABLED: central_session_enabled
         CENTRAL_SESSION_PUBLIC_BASE_URL: central_session_public_base_url

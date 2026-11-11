@@ -100,3 +100,29 @@ func TestSubsystemUpdateCatalogPublisherCredentialsRejectsDrift(t *testing.T) {
 		t.Fatalf("missing tenant err = %v", err)
 	}
 }
+
+// 报销启动时会发布自有 authz-catalog，因此受控更新必须重新下发目录发布者
+// 凭据；漏判会让旧环境继续使用过期密钥。规范客户端名沿用既有命名。
+func TestRequiresSubsystemCatalogPublisherCredentialIncludesReimbursement(t *testing.T) {
+	for _, applicationCode := range []string{
+		"reimbursement",
+		"contract_management",
+		"customer_and_opportunity",
+		"customer_portal",
+		"data_analysis",
+		"project_management",
+		"settlement",
+	} {
+		if !RequiresSubsystemCatalogPublisherCredential(applicationCode) {
+			t.Errorf("%s must receive a fresh catalog publisher credential during controlled updates", applicationCode)
+		}
+	}
+	for _, applicationCode := range []string{"platform", "unknown_app"} {
+		if RequiresSubsystemCatalogPublisherCredential(applicationCode) {
+			t.Errorf("%s must not receive a catalog publisher credential", applicationCode)
+		}
+	}
+	if name := CatalogPublisherClientName("reimbursement", "prod"); name != "reimbursement-prod-catalog-publisher" {
+		t.Fatalf("reimbursement publisher client name = %q", name)
+	}
+}

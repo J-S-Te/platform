@@ -422,10 +422,13 @@ func (manager subsystemInitialAccessManager) AssignInitialAdministrator(
 	return strings.Join(roleCodes, ","), nil
 }
 
-// hardcodedInitialSubsystemAdministratorRoles 是平台内置默认：未开启清单驱动或清单未声明时
-// 使用，保证既有子系统行为不变。
+// hardcodedInitialSubsystemAdministratorRoles 返回业务目录实际存在的初始配置角色。
+// 参数：applicationCode 为接入应用编码。
+// 返回值：业务限定管理员角色，不隐式授予审批或付款权限。
 func hardcodedInitialSubsystemAdministratorRoles(applicationCode string) []string {
 	switch strings.TrimSpace(applicationCode) {
+	case "reimbursement":
+		return []string{"reimbursement_admin"}
 	case "settlement":
 		// Settlement 拥有刻意带命名空间的角色目录。回退到遗留的通用 "admin" 角色
 		// 将授予不了任何权限，也绝不能让部署成功的运行时显得已就绪。

@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/csv"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"image"
@@ -47,8 +48,9 @@ const (
 	maxZIPNestingDepth  = 3
 )
 
-// validateStoredContent 对已落入隔离区的文件执行格式级校验。
-// MIME 探测只识别文件头，本步骤负责拒绝截断图片、伪造 PDF 和超大图片解码炸弹。
+// validateStoredContent 对隔离区文件执行有界完整格式校验。
+// 参数：mediaType为已核验类型，content为可回读原始文件流。
+// 返回值：格式与资源限制通过返回nil，损坏或危险内容返回错误。
 func validateStoredContent(mediaType string, content io.ReadSeeker) error {
 	if content == nil {
 		return errors.New("stored file is unavailable")
@@ -88,6 +90,11 @@ func validateStoredContent(mediaType string, content io.ReadSeeker) error {
 		lower := bytes.ToLower(data)
 		if bytes.Contains(lower, []byte("<!doctype")) || bytes.Contains(lower, []byte("<!entity")) {
 			return errors.New("XML contains a disallowed DTD or entity declaration")
+		}
+	case "application/json":
+		data, err := io.ReadAll(io.LimitReader(content, defaultUploadMaxBytes+1))
+		if err != nil || len(data) == 0 || int64(len(data)) > defaultUploadMaxBytes || !json.Valid(data) {
+			return errors.New("JSON archive manifest is invalid")
 		}
 	case "text/csv":
 		if err := validateCSV(content); err != nil {

@@ -66,6 +66,11 @@ type uploadPolicy struct {
 }
 
 var uploadPolicies = map[string]uploadPolicy{
+	"reimbursement.invoice.original":    policy("reimbursement", "invoice-original", false, "application/pdf", "application/ofd", "application/vnd.ofd", "image/png", "image/jpeg"),
+	"reimbursement.claim.evidence":      policy("reimbursement", "claim-evidence", false, "application/pdf", "image/png", "image/jpeg"),
+	"reimbursement.payment.voucher":     policy("reimbursement", "payment-voucher", false, "application/pdf", "image/png", "image/jpeg"),
+	"reimbursement.archive.package":     policy("reimbursement", "archive-package", false, "application/json"),
+	"reimbursement.export.result":       policy("reimbursement", "export-result", false, "text/csv", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
 	"platform.iam.user-import":          policy("platform", "iam-user-import", true, "text/csv"),
 	"crm.customer.import":               policy("crm", "customer-import", true, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
 	"crm.opportunity.attachment":        policy("crm", "opportunity-attachment", false, "application/pdf", "image/png", "image/jpeg", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
@@ -585,9 +590,13 @@ func canonicalMedia(value string) string {
 	}
 	return strings.ToLower(parsed)
 }
+
+// validPurposeApplication 将文件用途命名空间绑定到精确应用码。
+// 参数：code 为验签应用码，namespace 为服务端用途策略命名空间。
+// 返回值：仅受控别名匹配时返回true。
 func validPurposeApplication(code, namespace string) bool {
 	code = strings.ToLower(strings.TrimSpace(code))
-	aliases := map[string][]string{"platform": {"platform", "basic-platform", "basic_platform"}, "crm": {"customer_and_opportunity", "customer-opportunity", "crm"}, "portal": {"customer_portal", "customer-portal", "portal"}, "contract": {"contract_management", "contract-management", "contract"}, "project": {"project_management", "project-management", "project"}, "settlement": {"settlement"}}
+	aliases := map[string][]string{"platform": {"platform", "basic-platform", "basic_platform"}, "crm": {"customer_and_opportunity", "customer-opportunity", "crm"}, "portal": {"customer_portal", "customer-portal", "portal"}, "contract": {"contract_management", "contract-management", "contract"}, "project": {"project_management", "project-management", "project"}, "settlement": {"settlement"}, "reimbursement": {"reimbursement"}}
 	for _, alias := range aliases[namespace] {
 		if code == alias {
 			return true

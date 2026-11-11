@@ -142,6 +142,24 @@ func TestOfflineVerifyEnforcementRejectsLegacyOrBridgingMode(t *testing.T) {
 	}
 }
 
+// 长流水线回归：升级从业务镜像暂存走到授权验收需要数分钟，
+// 期间不再产生新的 READY/ACK 心跳。5 分钟前的心跳必须仍被接受，
+// 否则 controlled 阶段在真实流水线里永远无法通过（现场 2026-11-10 即为此缺陷）。
+func TestOfflineVerifyEnforcementAcceptsHeartbeatWithinPipelineWindow(t *testing.T) {
+	runner, verify, now := v2VerifyFixture(t)
+	coordinator := runner.coordinator.(v2VerifyCoordinator)
+	status := coordinator.status
+	recent := now.Add(-5 * time.Minute)
+	for index := range status.Members {
+		status.Members[index].ReadyAt = &recent
+		status.Members[index].AckAt = &recent
+	}
+	runner.coordinator = v2VerifyCoordinator{status: status}
+	if _, err := runner.verifyEnforcement(context.Background(), verify, func() time.Time { return now }); err != nil {
+		t.Fatalf("流水线时长内的心跳必须通过：%v", err)
+	}
+}
+
 func TestOfflineVerifyEnforcementRejectsIncompleteV2Facts(t *testing.T) {
 	for _, mutation := range []string{"missing-ack", "stale-ready", "catalog-size", "snapshot-drift"} {
 		t.Run(mutation, func(t *testing.T) {
@@ -152,7 +170,8 @@ func TestOfflineVerifyEnforcementRejectsIncompleteV2Facts(t *testing.T) {
 			case "missing-ack":
 				status.Members[0].AckAt = nil
 			case "stale-ready":
-				old := now.Add(-2 * time.Minute)
+				// 超过 offlineHeartbeatTolerance（10 分钟）才算陈旧：60 秒窗口会让长流水线必然失败。
+				old := now.Add(-11 * time.Minute)
 				status.Members[0].ReadyAt = &old
 			case "catalog-size":
 				status.Members = status.Members[:1]

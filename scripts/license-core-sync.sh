@@ -30,6 +30,18 @@ verify_source_list() {
   expected=$(printf '%s\n' $production_files | sort)
   [ "$actual" = "$expected" ] || { echo 'review the recursive license core source allowlist before syncing' >&2; exit 1; }
 }
+# sync_vendor 通过已审核白名单同步现有vendor，避免测试专用模块影响运行副本。
+# 参数：无；路径与文件集合来自本脚本固定声明。
+# 返回值：未知文件或符号链接失败；未启用vendor时不创建新目录。
+sync_vendor() {
+  vendor_root="$platform_root/vendor/github.com/J-S-Te/license-core"
+  [ -d "$vendor_root" ] || return 0
+  [ -z "$(find "$vendor_root" -type l -print)" ] || return 1
+  actual=$(cd "$vendor_root" && find . -type f | sed 's|^./||' | sort)
+  expected=$(printf '%s\n' $production_files | sort)
+  [ "$actual" = "$expected" ] || { echo 'license core vendor allowlist drift' >&2; return 1; }
+  for file in $production_files; do cp "$mirror/$file" "$vendor_root/$file"; done
+}
 mode=${1:---check}
 source_root=${2:-$platform_root/../license-core}
 case "$mode" in
@@ -42,6 +54,7 @@ case "$mode" in
     : > "$manifest"
     for file in $files; do printf '%s  %s\n' "$(digest "$mirror/$file")" "$file" >> "$manifest"; done
     verify "$mirror"
+    sync_vendor
     ;;
   --check)
     verify "$mirror"
@@ -58,7 +71,7 @@ case "$mode" in
       [ "$actual" = "$expected" ] || { echo 'license core vendor allowlist drift' >&2; exit 1; }
       [ -z "$(find "$vendor_root" -type l -print)" ] || { echo 'license core vendor symlinks rejected' >&2; exit 1; }
       for file in $production_files; do
-        cmp -s "$mirror/$file" "$platform_root/vendor/github.com/J-S-Te/license-core/$file" || { echo "license core vendor drift: $file (run go mod vendor)" >&2; exit 1; }
+        cmp -s "$mirror/$file" "$platform_root/vendor/github.com/J-S-Te/license-core/$file" || { echo "license core vendor drift: $file (run scripts/license-core-sync.sh --sync)" >&2; exit 1; }
       done
     fi
     ;;

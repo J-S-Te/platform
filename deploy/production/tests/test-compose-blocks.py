@@ -65,7 +65,7 @@ LOG_BIN_TRUST_FLAG = "--log-bin-trust-function-creators=1"
 MYSQL_CLIENT_SERVICES = {"data-analysis-metabase-init"}
 EXPECTED_MYSQL_SERVERS = {
     "keycloak-db", "platform-mysql", "contract-mysql", "file-gateway-mysql",
-    "project-mysql", "customer-mysql", "portal-mysql", "settlement-mysql",
+    "project-mysql", "customer-mysql", "portal-mysql", "reimbursement-mysql", "settlement-mysql",
     "data-analysis-mysql",
 }
 
@@ -130,6 +130,12 @@ def main():
             "KEYCLOAK_ADMIN_PASSWORD": "fixture-not-a-secret", "KEYCLOAK_PUBLIC_URL": "http://localhost:18090",
             "FILE_GATEWAY_DB_PASSWORD": "fixture-not-a-secret", "FILE_GATEWAY_DB_ROOT_PASSWORD": "fixture-not-a-secret",
             "AUTH_JWT_ISSUER": "fixture", "AUTH_APPLICATION_JWT_AUDIENCE": "fixture",
+            # 公开传输值由 deploy.sh 在部署期解析并持久化到 .env；编排侧用必填语法（:?）要求
+            # 它们显式存在，因此组合枚举夹具必须像真实部署那样提供解析结果。
+            "PUBLIC_PLATFORM_ORIGIN": "https://platform.example.com",
+            "PUBLIC_SSO_ORIGIN": "https://sso.example.com",
+            "PUBLIC_TRANSPORT_COOKIE_SECURE": "true",
+            "PUBLIC_TRANSPORT_KEYCLOAK_REQUIRE_HTTPS": "true",
             "MYSQL_DATABASE": "platform", "MYSQL_USER": "platform", "MYSQL_PASSWORD": "fixture-not-a-secret",
             "MYSQL_ROOT_PASSWORD": "fixture-not-a-secret", "CONTRACT_MYSQL_PASSWORD": "fixture-not-a-secret",
             "CONTRACT_MYSQL_ROOT_PASSWORD": "fixture-not-a-secret",

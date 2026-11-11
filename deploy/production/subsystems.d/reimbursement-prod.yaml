@@ -1,0 +1,68 @@
+# 商业许可由平台独立投递，不在此放宽许可或永久设置迁移备份批准。
+version: 1
+default: false
+application:
+  code: reimbursement
+  initial_admin_roles: [reimbursement_admin]
+  allowed_service_bindings: [reimbursement_project_reference_read, project_reimbursement_cost_write, owner_directory_read, notification_ingest, file_gateway_write]
+  name: 报销管理系统
+  description: 项目费用报销、审批、付款事实登记与归档
+  environment: prod
+  path_prefix: /reimbursement
+  upstream_url: http://reimbursement-api:8087
+  client_type: confidential
+runtime:
+  required_infrastructure_keys: [REIMBURSEMENT_MYSQL_PASSWORD, REIMBURSEMENT_MYSQL_ROOT_PASSWORD]
+  files:
+    - path: runtime/reimbursement.env
+      template_path: subsystem-templates/reimbursement.env.example
+      compose_environment_key: REIMBURSEMENT_RUNTIME_ENV_FILE
+      required_existing_keys: []
+      generated_keys: [OIDC_SESSION_ENCRYPTION_KEY_BASE64]
+      values:
+        HTTP_ADDRESS: :8087
+        MYSQL_DSN: 'reimbursement:${REIMBURSEMENT_MYSQL_PASSWORD}@tcp(reimbursement-mysql:3306)/reimbursement?parseTime=true&charset=utf8mb4&loc=UTC'
+        PLATFORM_BASE_URL: http://platform-api:8080
+        PLATFORM_APPLICATION_CODE: reimbursement
+        PROJECT_API_BASE_URL: http://project-api:8082
+        FILE_GATEWAY_BASE_URL: http://file-gateway:8086
+        FILE_GATEWAY_SCOPE: platform:file:upload platform:file:bind platform:file:download
+        OIDC_SESSION_COOKIE_NAME: reimbursement_session
+        REIMBURSEMENT_AUDIT_REQUIRED: "true"
+      bindings:
+        PUBLIC_BASE_URL: public_url_no_trailing_slash
+        PLATFORM_ENVIRONMENT_CODE: environment
+        CENTRAL_SESSION_ENABLED: central_session_enabled
+        CENTRAL_SESSION_PUBLIC_BASE_URL: central_session_public_base_url
+        OIDC_ISSUER: issuer
+        OIDC_BACKCHANNEL_BASE_URL: oidc_backchannel_base_url
+        OIDC_CLIENT_ID: client_id
+        OIDC_CLIENT_SECRET: client_secret
+        OIDC_TENANT_ID: tenant_id
+        OIDC_REDIRECT_URI: redirect_uri
+        OIDC_SESSION_COOKIE_SECURE: cookie_secure
+        PROJECT_REFERENCE_CLIENT_ID: service.reimbursement_project_reference_read.client_id
+        PROJECT_REFERENCE_CLIENT_SECRET: service.reimbursement_project_reference_read.client_secret
+        PROJECT_SPEND_CLIENT_ID: service.project_reimbursement_cost_write.client_id
+        PROJECT_SPEND_CLIENT_SECRET: service.project_reimbursement_cost_write.client_secret
+        PLATFORM_OWNER_DIRECTORY_CLIENT_ID: service.owner_directory_read.client_id
+        PLATFORM_OWNER_DIRECTORY_CLIENT_SECRET: service.owner_directory_read.client_secret
+        PLATFORM_AUDIT_CLIENT_ID: service.audit_ingest.client_id
+        PLATFORM_AUDIT_CLIENT_SECRET: service.audit_ingest.client_secret
+        PLATFORM_NOTIFICATION_CLIENT_ID: service.notification_ingest.client_id
+        PLATFORM_NOTIFICATION_CLIENT_SECRET: service.notification_ingest.client_secret
+        FILE_GATEWAY_CLIENT_ID: service.file_gateway_write.client_id
+        FILE_GATEWAY_CLIENT_SECRET: service.file_gateway_write.client_secret
+        PLATFORM_AUTHORIZATION_CATALOG_APPLICATION_ID: application_id
+        PLATFORM_AUTHORIZATION_CATALOG_CLIENT_ID: catalog_publisher_client_id
+        PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET: catalog_publisher_client_secret
+compose:
+  dependency_services: [reimbursement-mysql]
+  database:
+    service: reimbursement-mysql
+    name: reimbursement
+  migrate_service: reimbursement-migrate
+  catalog_sync_service: reimbursement-catalog-sync
+  runtime_services: [reimbursement-api, reimbursement-worker]
+  teardown_services: [reimbursement-api, reimbursement-worker]
+  release_image_keys: [REIMBURSEMENT_IMAGE]

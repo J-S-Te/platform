@@ -23,6 +23,7 @@ var localRuntimeDigest = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)
 var localRuntimeVersion = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
 
 var localLicenseServices = map[string][]string{
+	"reimbursement":            {"reimbursement-api", "reimbursement-worker"},
 	"contract_management":      {"contract-api", "contract-worker"},
 	"customer_and_opportunity": {"customer-api", "customer-opportunity-alert-worker", "customer-owner-notification-worker", "customer-presale-assignment-notification-worker", "customer-presale-progress-notification-worker", "customer-notification-delivery-worker", "customer-presale-alert-worker", "presale-worker", "contract-transfer-worker"},
 	"customer_portal":          {"portal-api", "portal-report-worker", "portal-invite-compensation-worker"},
@@ -38,7 +39,7 @@ type localLicenseMigration struct {
 	Protocol    string `json:"protocol"`
 }
 
-var localLicenseMigrations = map[string]string{"contract_management": "contract-migrate", "customer_and_opportunity": "customer-migrate", "customer_portal": "portal-migrate", "project_management": "project-migrate", "settlement": "settlement-migrate", "data_analysis": "dashboard-migrate"}
+var localLicenseMigrations = map[string]string{"reimbursement": "reimbursement-migrate", "contract_management": "contract-migrate", "customer_and_opportunity": "customer-migrate", "customer_portal": "portal-migrate", "project_management": "project-migrate", "settlement": "settlement-migrate", "data_analysis": "dashboard-migrate"}
 
 type localRuntimeRelease struct {
 	Migration     localLicenseMigration                `json:"migration"`
@@ -467,6 +468,9 @@ func writeLocalRuntimeJSON(path string, b []byte) error {
 
 // 本操作之前必须已完成收编登记。在这里构建会使控制面刚登记的发布失效，
 // 因此全部运行时镜像保持钉定。
+// deployLicensedLocalStack 使用当前已批准镜像依次执行备份、迁移、目录及组件启动。
+// 参数：ctx为受控操作上下文，input为批准目标及许可材料。
+// 返回值：全部实际步骤及许可预检成功时返回nil；失败保留现场。
 func (p *LocalDockerSubsystemProvisioner) deployLicensedLocalStack(ctx context.Context, input application.SubsystemProvisioningInput) error {
 	// 受许可容器必须在固定记录里带 license-state-<service> 卷与只读公钥挂载：缺失时 API
 	// 启动即因“commercial license configuration failed”重启，且不会进入健康检查失败的
@@ -502,6 +506,10 @@ func (p *LocalDockerSubsystemProvisioner) deployLicensedLocalStack(ctx context.C
 		deps = []string{"settlement-mysql"}
 		migration = "settlement-migrate"
 		api = "settlement-api"
+	case "reimbursement":
+		deps = []string{"reimbursement-mysql"}
+		migration = "reimbursement-migrate"
+		api = "reimbursement-api"
 	case "data_analysis":
 		deps = []string{"dashboard-mysql"}
 		migration = "dashboard-migrate"
@@ -529,8 +537,24 @@ func (p *LocalDockerSubsystemProvisioner) deployLicensedLocalStack(ctx context.C
 			return err
 		}
 	}
-	if err := run(ctx, "run", "--rm", "--no-deps", migration); err != nil {
+	migrationArgs := []string{"run", "--rm", "--no-deps", migration}
+	if input.ApplicationCode == "reimbursement" {
+		if err := backupLocalReimbursement(ctx, run); err != nil {
+			return err
+		}
+		var err error
+		migrationArgs, err = reimbursementMigrationArguments("", migration, true)
+		if err != nil {
+			return err
+		}
+	}
+	if err := run(ctx, migrationArgs...); err != nil {
 		return err
+	}
+	if input.ApplicationCode == "reimbursement" {
+		if err := run(ctx, "run", "--rm", "--no-deps", "--entrypoint", "/app/reimbursement-authz-catalog", api, "publish"); err != nil {
+			return err
+		}
 	}
 	if len(catalog) > 0 {
 		if err := run(ctx, append([]string{"run", "--rm", "--no-deps", api}, catalog...)...); err != nil {

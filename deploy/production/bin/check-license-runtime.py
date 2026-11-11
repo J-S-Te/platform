@@ -55,6 +55,7 @@ APPLICATIONS = {
     "customer_and_opportunity": (("customer-api",), "客户与商机管理系统"),
     "customer_portal": (("portal-api",), "客户自助门户"),
     "project_management": (("project-api",), "项目服务内容管理系统"),
+    "reimbursement": (("reimbursement-api",), "报销管理系统"),
     "settlement": (("settlement-api",), "结算与开票管理系统"),
     "data_analysis": (("data-analysis-api", "dashboard-api"), "数据看板与统计分析系统"),
 }

@@ -26,7 +26,7 @@ SECRET = "DO_NOT_LOG_CUSTOMER_OR_INSTANCE_8d220731"
 APP = "contract_management"
 PROFILES = {"customer_and_opportunity": "customer_and_opportunity-prod.yaml", "customer_portal": "customer_portal-prod.yaml",
             "contract_management": "contract_management-prod.yaml", "project_management": "project_management-prod.yaml",
-            "settlement": "settlement-prod.yaml", "data_analysis": "data-analysis-prod.yaml"}
+            "reimbursement": "reimbursement-prod.yaml", "settlement": "settlement-prod.yaml", "data_analysis": "data-analysis-prod.yaml"}
 COMPONENT_PREFIXES = {"common": "common-infrastructure", "platform": "platform-backend", "frontend": "frontend",
                       "contract": "contract-backend", "project": "project-backend", "customer-opportunity": "customer-opportunity-backend",
                       "customer-portal": "customer-portal-backend", "data-analysis": "data-analysis-backend"}

@@ -7,6 +7,7 @@ rule_files:
   - /etc/prometheus/file-gateway-alerts.yml
   - /etc/prometheus/platform-alerts.yml
   - /etc/prometheus/integration-alerts.yml
+  - /etc/prometheus/reimbursement-alerts.yml
 
 # 抓取边界（BIZ-XWIRE-08）：本文件全部 target 都是 Compose `application` 网络内的服务名，
 # 不含宿主机地址。被监控服务的 /metrics 一律不发布宿主机端口，也不出现在前端 nginx 的
@@ -87,3 +88,10 @@ scrape_configs:
     metrics_path: /metrics
     static_configs:
       - targets: ["settlement-api:8085"]
+
+  # 报销worker仅内网健康端口，指标不含租户、主体或单据标识。
+  # access: network-only
+  - job_name: reimbursement-worker
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["reimbursement-worker:9097"]

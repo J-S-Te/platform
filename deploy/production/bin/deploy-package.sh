@@ -11,6 +11,7 @@ discover_package() {
     customer-portal) pattern='customer-portal-backend-*-linux-amd64.tar.gz' ;;
     contract) pattern='contract-backend-*-linux-amd64.tar.gz' ;;
     project) pattern='project-backend-*-linux-amd64.tar.gz' ;;
+    reimbursement) pattern='reimbursement-backend-*-linux-amd64.tar.gz' ;;
     settlement) pattern='settlement-backend-*-linux-amd64.tar.gz' ;;
     data-analysis) pattern='data-analysis-backend-*-linux-amd64.tar.gz' ;;
     *) die "不支持自动发现的组件：$component" ;;
@@ -36,6 +37,9 @@ discover_package() {
   printf '%s\n' "${matches[0]}"
 }
 
+# package_index 为每个离线组件分配互不覆盖的包槽位。
+# 参数：首个参数为组件代码。
+# 返回值：输出唯一索引；未知组件返回非零。
 package_index() {
   case "$1" in
     common) printf '0' ;;
@@ -45,12 +49,16 @@ package_index() {
     customer-portal) printf '4' ;;
     contract) printf '5' ;;
     project) printf '6' ;;
-    settlement) printf '7' ;;
-    data-analysis) printf '8' ;;
+    reimbursement) printf '7' ;;
+    settlement) printf '8' ;;
+    data-analysis) printf '9' ;;
     *) return 1 ;;
   esac
 }
 
+# auto_install_packages 按启用范围导入并准备已验证的离线组件。
+# 参数：无；包目录及范围由安装上下文提供。
+# 返回值：全部阶段成功返回零；任一必要门禁失败停止安装。
 auto_install_packages() {
   require_initialized
   scope_services >/dev/null || die '统一 Compose 无法解析'
@@ -58,7 +66,7 @@ auto_install_packages() {
   local component archive index
   local -a packages=()
   local -a basic_platform_services=()
-  local -a ordered=(common platform frontend customer-opportunity customer-portal contract project settlement data-analysis)
+  local -a ordered=(common platform frontend customer-opportunity customer-portal contract project reimbursement settlement data-analysis)
 
   printf '扫描镜像包目录：%s\n' "$package_dir"
   # 先解析全部包名并检查歧义，避免平台启动后才发现包版本冲突。
@@ -129,9 +137,9 @@ auto_install_packages() {
   if workflow_enabled; then workflow_done license-prepare || return $?; fi
 
   printf '\n阶段 D：导入并准备已提供的业务子系统镜像\n'
-  for component in customer-opportunity customer-portal contract project settlement data-analysis; do
+  for component in customer-opportunity customer-portal contract project reimbursement settlement data-analysis; do
     index="$(package_index "$component")"
-    if [[ -z "${packages[$index]:-}" ]]; then
+    if ! scope_enabled "$component" || [[ -z "${packages[$index]:-}" ]]; then
       if workflow_enabled && discover_package "$component" >/dev/null 2>&1; then
         workflow_start "${component}-import" || return $?
         workflow_update "${component}-import" SKIPPED COMPONENT_DISABLED || return $?

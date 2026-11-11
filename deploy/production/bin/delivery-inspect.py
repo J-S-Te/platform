@@ -39,14 +39,14 @@ CHINESE_NAMES = {"服务器一键离线部署.sh", "系统运维工具.sh", "清
 COMPONENTS = {
     "common": "common-infrastructure", "platform": "platform-backend", "frontend": "frontend",
     "customer-opportunity": "customer-opportunity-backend", "customer-portal": "customer-portal-backend",
-    "contract": "contract-backend", "project": "project-backend", "settlement": "settlement-backend", "data-analysis": "data-analysis-backend",
+    "contract": "contract-backend", "project": "project-backend", "reimbursement": "reimbursement-backend", "settlement": "settlement-backend", "data-analysis": "data-analysis-backend",
 }
 APPS = {"customer-opportunity": "customer_and_opportunity", "customer-portal": "customer_portal", "contract": "contract_management",
-        "project": "project_management", "settlement": "settlement", "data-analysis": "data_analysis"}
+        "project": "project_management", "reimbursement": "reimbursement", "settlement": "settlement", "data-analysis": "data_analysis"}
 APP_COMPONENT = {app: component for component, app in APPS.items()}
 PROFILES = {"customer_and_opportunity": "customer_and_opportunity-prod.yaml", "customer_portal": "customer_portal-prod.yaml",
             "contract_management": "contract_management-prod.yaml", "project_management": "project_management-prod.yaml",
-            "settlement": "settlement-prod.yaml", "data_analysis": "data-analysis-prod.yaml"}
+            "reimbursement": "reimbursement-prod.yaml", "settlement": "settlement-prod.yaml", "data_analysis": "data-analysis-prod.yaml"}
 PROXY = "ghcr.io/tecnativa/docker-socket-proxy:v0.5.0@sha256:1f5038b54f06c3e18422902cf00ba21803d1c97805aae032e5e6673d532d3459"
 CORE = {"keycloak-db", "keycloak", "platform-mysql", "platform-migrate", "platform-api", "platform-worker", "docker-socket-proxy",
         "subsystem-provisioner", "platform-key-init", "subsystem-provisioner-socket-init", "frontend", "file-gateway-mysql", "file-gateway",
@@ -594,7 +594,7 @@ class Inspection:
                 raise Invalid("deployment assets lack a required production profile")
             self.projections[app] = parser.projection(self.assets[path].decode("utf-8"), app)
         self.report["consumer_count"] = sum(len(self.projections[app][0]["runtime_services"])-int(app == "data_analysis") for app in self.report["applications"])
-        self.check("assets.profiles", "PASS", "MEDIA", "六份生产清单可解析，运行组件数量来自实际清单")
+        self.check("assets.profiles", "PASS", "MEDIA", "七份生产清单可解析，运行组件数量来自实际清单")
         self.current_id = "release.structure"
         release = sibling("delivery-inspect-v2.py")
         try:
@@ -602,7 +602,7 @@ class Inspection:
         except release.Invalid as error:
             raise Invalid(str(error)) from error
         if self.registration_protocols:
-            self.check("release.structure", "PASS", "MEDIA", "发布清单、应用组件、真实镜像、六份清单与总校验字节一致；尚未验签")
+            self.check("release.structure", "PASS", "MEDIA", "发布清单、应用组件、真实镜像、七份清单与总校验字节一致；尚未验签")
             self.check("authority.release-signature", "PENDING", "VERIFIER", "发布签名和构建证明须由介质外受信验证器核验，结构通过不能建立发布信任", False)
             self.action("VERIFIER", "VERIFY_RELEASE_INTEGRITY", "使用独立受信验证器与信任根核验原始介质签名和构建证明")
         self.current_id = "assets.recovery-tools"

@@ -215,6 +215,48 @@ env_get() {
 }
 PUBLIC_PLATFORM_ORIGIN='http://platform.test'
 PUBLIC_KEYCLOAK_ISSUER='http://keycloak.test/realms/basic-platform'
+# 公开传输声明必须来自部署脚本的解析结果（编排侧用必填语法要求它们存在）。
+PUBLIC_TRANSPORT_COOKIE_SECURE=false
+
+# 公开传输运行态门禁：容器生效的回跳地址/Secure Cookie 与部署声明不一致时必须失败关闭并给出
+# 修复命令；一致时必须留下验收证据。健康检查完全看不到这一层（现场事故=健康全绿但登录 401 死循环）。
+oidc_container_env="$test_root/oidc-container.env"
+drift_compose() { return 0; }
+drift_docker() {
+  case "${1:-}" in
+    ps)
+      [[ "$*" == *'com.docker.compose.service=customer-api' ]] && printf 'container-customer-api\n'
+      return 0
+      ;;
+    inspect)
+      [[ "${4:-}" == *'Config.Env'* || "${3:-}" == *'Config.Env'* ]] && cat "$oidc_container_env"
+      return 0
+      ;;
+    *) return 0 ;;
+  esac
+}
+compose() { drift_compose "$@"; }
+docker() { drift_docker "$@"; }
+{
+  printf 'OIDC_REDIRECT_URI=http://localhost:8081/customer-opportunity/auth/callback\n'
+  printf 'OIDC_SESSION_COOKIE_SECURE=true\n'
+} >"$oidc_container_env"
+if (verify_public_transport_consistency) >"$test_root/transport-drift.log" 2>&1; then
+  fail '容器回跳地址/ Secure Cookie 漂移通过了公开传输门禁'
+fi
+grep -Fq 'customer-api	OIDC_REDIRECT_URI	http://platform.test/customer-opportunity/auth/callback	http://localhost:8081/customer-opportunity/auth/callback' \
+  "$test_root/transport-drift.log" || fail '公开传输漂移未点名服务、变量、声明值与实际值'
+grep -Fq 'customer-api	OIDC_SESSION_COOKIE_SECURE	false	true' "$test_root/transport-drift.log" \
+  || fail '公开传输漂移未报告 Secure Cookie 不一致'
+grep -Fq 'configure --force' "$test_root/transport-drift.log" || fail '公开传输漂移缺少可执行修复命令'
+{
+  printf 'OIDC_REDIRECT_URI=http://platform.test/customer-opportunity/auth/callback\n'
+  printf 'OIDC_SESSION_COOKIE_SECURE=false\n'
+} >"$oidc_container_env"
+(verify_public_transport_consistency) >"$test_root/transport-ok.log" 2>&1 ||
+  fail '一致的公开传输运行态未通过门禁'
+grep -Fq '[验收证据] 运行中 OIDC 消费者的回跳地址与 Secure Cookie 与部署声明一致' "$test_root/transport-ok.log" \
+  || fail '公开传输一致性验收证据缺失'
 compose() {
   case "${1:-}" in
     config) printf '%s\n' "$fixture_config" ;;

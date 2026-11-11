@@ -47,10 +47,10 @@ func TestProductionSubsystemProfilesLoadReviewedRepositoryTargets(t *testing.T) 
 	if !capabilities.Enabled || capabilities.Mode != "production" || capabilities.DefaultApplicationCode != "contract_management" {
 		t.Fatalf("capabilities = %#v", capabilities)
 	}
-	if !reflect.DeepEqual(capabilities.SupportedApplicationCodes, []string{"contract_management", "customer_and_opportunity", "customer_portal", "data_analysis", "project_management", "settlement"}) {
+	if !reflect.DeepEqual(capabilities.SupportedApplicationCodes, []string{"contract_management", "customer_and_opportunity", "customer_portal", "data_analysis", "project_management", "reimbursement", "settlement"}) {
 		t.Fatalf("supported applications = %#v", capabilities.SupportedApplicationCodes)
 	}
-	if len(capabilities.Targets) != 6 {
+	if len(capabilities.Targets) != 7 {
 		t.Fatalf("targets = %#v", capabilities.Targets)
 	}
 	portalRolesVerified := false
@@ -74,7 +74,7 @@ func TestProductionSubsystemProfilesLoadReviewedRepositoryTargets(t *testing.T) 
 	if err != nil {
 		t.Fatalf("construct profile registry: %v", err)
 	}
-	for _, target := range []string{"customer_portal", "data_analysis", "project_management", "settlement"} {
+	for _, target := range []string{"customer_portal", "data_analysis", "project_management", "reimbursement", "settlement"} {
 		if _, err := provisioner.target(target, "prod"); err != nil {
 			t.Fatalf("reviewed target %s/prod was not routable: %v", target, err)
 		}
@@ -146,6 +146,7 @@ func TestProductionSubsystemProfilesProvidePortableDatabaseDSNs(t *testing.T) {
 		"data_analysis": {
 			"DASHBOARD_MYSQL_DSN": "dashboard:${DASHBOARD_MYSQL_PASSWORD}@tcp(data-analysis-mysql:3306)/dashboard_aggregation?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci",
 		},
+		"reimbursement": {"MYSQL_DSN": "reimbursement:${REIMBURSEMENT_MYSQL_PASSWORD}@tcp(reimbursement-mysql:3306)/reimbursement?parseTime=true&charset=utf8mb4&loc=UTC"},
 		"project_management": {
 			"MYSQL_DSN": "project:${PROJECT_MYSQL_PASSWORD}@tcp(project-mysql:3306)/project_management?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci",
 		},

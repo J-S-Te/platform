@@ -444,6 +444,9 @@ func (provisioner *LocalDockerSubsystemProvisioner) Teardown(ctx context.Context
 		_, localApprovalErr := os.Lstat(localApproval)
 		if isIntegratedSubsystem(applicationCode) || (localApprovalErr == nil && len(localLicenseServices[applicationCode]) > 0) {
 			services := []string{"contract-api", "contract-worker"}
+			if applicationCode == "reimbursement" {
+				services = []string{"reimbursement-api", "reimbursement-worker"}
+			}
 			if applicationCode == integratedCustomerApplicationCode {
 				services = []string{"customer-api"}
 			} else if applicationCode == integratedPortalApplicationCode {
@@ -598,6 +601,8 @@ func (provisioner *LocalDockerSubsystemProvisioner) rebuildLocked(ctx context.Co
 		rebuildErr = provisioner.rebuildIntegratedCustomerStack(operationCtx)
 	case input.ApplicationCode == integratedPortalApplicationCode:
 		rebuildErr = provisioner.rebuildIntegratedPortalStack(operationCtx)
+	case input.ApplicationCode == "reimbursement":
+		rebuildErr = provisioner.rebuildIntegratedReimbursementStack(operationCtx)
 	case input.ApplicationCode == integratedProjectApplicationCode:
 		rebuildErr = provisioner.rebuildIntegratedProjectStack(operationCtx)
 	default:
@@ -1511,6 +1516,8 @@ func (provisioner *LocalDockerSubsystemProvisioner) applyLocked(ctx context.Cont
 		startErr = provisioner.rebuildIntegratedCustomerStack(operationCtx)
 	case input.ApplicationCode == integratedPortalApplicationCode:
 		startErr = provisioner.rebuildIntegratedPortalStack(operationCtx)
+	case input.ApplicationCode == "reimbursement":
+		startErr = provisioner.rebuildIntegratedReimbursementStack(operationCtx)
 	case input.ApplicationCode == integratedProjectApplicationCode:
 		startErr = provisioner.rebuildIntegratedProjectStack(operationCtx)
 	default:
@@ -1810,6 +1817,10 @@ func (provisioner *LocalDockerSubsystemProvisioner) executeIntegratedPlatformCom
 	if err != nil {
 		return nil, err
 	}
+	reimbursementEnvironment, err := integratedRuntimeEnvironment(filepath.Join(platformRoot, "docker", ".env.reimbursement.local"), required["reimbursement"])
+	if err != nil {
+		return nil, err
+	}
 	// 集成子系统重建必须确定性执行，不得继承启动平台 API 的 shell 中残留的 LAN 覆盖值。
 	// 常规 docker-local 入口会显式设置这些值；provisioner 从 API 容器内部运行 Compose，必须
 	// 做同样的事。否则 Compose 可能解析到旧的或缺失的 platform/docker/.env.lan，把
@@ -1829,6 +1840,7 @@ func (provisioner *LocalDockerSubsystemProvisioner) executeIntegratedPlatformCom
 		"--env-file", portalEnvironment,
 		"--env-file", projectEnvironment,
 		"--env-file", settlementEnvironment,
+		"--env-file", reimbursementEnvironment,
 		"--env-file", analysisEnvironment,
 		"-f", composeFile,
 	}
@@ -1854,6 +1866,7 @@ func (provisioner *LocalDockerSubsystemProvisioner) executeIntegratedPlatformCom
 		"PROJECT_SUBSYSTEM_ENVIRONMENT":       {},
 		"DATA_ANALYSIS_SUBSYSTEM_ENVIRONMENT": {},
 		"SETTLEMENT_SUBSYSTEM_ENVIRONMENT":    {},
+		"REIMBURSEMENT_SUBSYSTEM_ENVIRONMENT": {},
 	}
 	workerEnvironment, err := integratedRuntimeEnvironment(
 		filepath.Join(platformRoot, "docker", ".env.portal-report-worker.local"), required["portal_report"])
@@ -1893,6 +1906,7 @@ func (provisioner *LocalDockerSubsystemProvisioner) executeIntegratedPlatformCom
 		"PORTAL_RUNTIME_ENV_FILE="+portalEnvironment,
 		"PROJECT_RUNTIME_ENV_FILE="+projectEnvironment,
 		"SETTLEMENT_RUNTIME_ENV_FILE="+settlementEnvironment,
+		"REIMBURSEMENT_RUNTIME_ENV_FILE="+reimbursementEnvironment,
 		"DATA_ANALYSIS_RUNTIME_ENV_FILE="+analysisEnvironment,
 		"PRESALE_WORKER_ENV_FILE="+presaleEnvironment,
 		"BASIC_PLATFORM_HOST_PROJECT_ROOT="+platformRoot,
@@ -1909,6 +1923,7 @@ func (provisioner *LocalDockerSubsystemProvisioner) executeIntegratedPlatformCom
 		{"PROJECT_SUBSYSTEM_ENVIRONMENT", projectEnvironment, integratedProjectApplicationCode, "OIDC_CLIENT_ID"},
 		{"DATA_ANALYSIS_SUBSYSTEM_ENVIRONMENT", filepath.Join(workspaceRoot, "data_analysis", ".env.local"), "data_analysis", "OIDC_CLIENT_ID"},
 		{"SETTLEMENT_SUBSYSTEM_ENVIRONMENT", settlementEnvironment, "settlement", "OIDC_CLIENT_ID"},
+		{"REIMBURSEMENT_SUBSYSTEM_ENVIRONMENT", reimbursementEnvironment, "reimbursement", "OIDC_CLIENT_ID"},
 	}
 	for _, target := range runtimeEnvironments {
 		environment := localRuntimeEnvironment(target.path, target.applicationCode, target.clientKey)
@@ -2003,6 +2018,8 @@ func integratedRuntimeTargets(arguments []string) map[string]bool {
 			required["portal"] = true
 		case strings.HasPrefix(service, "project-"), service == "sla-notifier":
 			required["project"] = true
+		case strings.HasPrefix(service, "reimbursement-"):
+			required["reimbursement"] = true
 		case strings.HasPrefix(service, "settlement-"):
 			required["settlement"] = true
 		case strings.HasPrefix(service, "dashboard-"), service == "aggregation-worker", service == "alert-worker":
@@ -2057,7 +2074,23 @@ func (provisioner *LocalDockerSubsystemProvisioner) integratedComposeConfigurati
 		paths[0].path, paths[1].path, paths[2].path, paths[3].path, nil
 }
 
+// subsystemEnvironmentPaths 解析受控应用模板和目标运行文件。
+// 参数：applicationCode为应用码，projectDirectory为已核验目录。
+// 返回值：模板源和目标路径；来源缺失时返回错误，不自行寻找业务配置替代。
 func (provisioner *LocalDockerSubsystemProvisioner) subsystemEnvironmentPaths(applicationCode, projectDirectory string) (string, string, error) {
+	if applicationCode == "reimbursement" {
+		root := filepath.Dir(filepath.Dir(provisioner.config.GatewayScriptPath))
+		destination := filepath.Join(root, "docker", ".env.reimbursement.local")
+		if info, err := os.Stat(destination); err == nil && info.Mode().IsRegular() {
+			return destination, destination, nil
+		}
+		source := filepath.Join(root, "docker", ".env.reimbursement.local.example")
+		if info, err := os.Stat(source); err == nil && info.Mode().IsRegular() {
+			return source, destination, nil
+		}
+		return "", "", os.ErrNotExist
+	}
+
 	if applicationCode == integratedCustomerApplicationCode {
 		platformRoot := filepath.Dir(filepath.Dir(provisioner.config.GatewayScriptPath))
 		destination := filepath.Join(platformRoot, "docker", ".env.customer.local")
@@ -2089,9 +2122,12 @@ func (provisioner *LocalDockerSubsystemProvisioner) subsystemEnvironmentPaths(ap
 	return source, filepath.Join(projectDirectory, ".env.local"), nil
 }
 
+// isIntegratedSubsystem 判断应用是否由平台统一Compose托管。
+// 参数：applicationCode为已规范化应用码。
+// 返回值：受控集成应用返回true。
 func isIntegratedSubsystem(applicationCode string) bool {
 	switch strings.TrimSpace(applicationCode) {
-	case integratedContractApplicationCode, integratedCustomerApplicationCode, integratedPortalApplicationCode, integratedProjectApplicationCode, integratedSettlementApplicationCode:
+	case "reimbursement", integratedContractApplicationCode, integratedCustomerApplicationCode, integratedPortalApplicationCode, integratedProjectApplicationCode, integratedSettlementApplicationCode:
 		return true
 	default:
 		return false

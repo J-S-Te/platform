@@ -1543,7 +1543,151 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  # BEGIN SUBSYSTEM: reimbursement — 报销管理 开始
+  reimbursement-mysql:
+    image: mysql:8.4
+    profiles: ["reimbursement"]
+    environment:
+      TZ: Asia/Shanghai
+      MYSQL_DATABASE: reimbursement
+      MYSQL_USER: reimbursement
+      MYSQL_PASSWORD: ${REIMBURSEMENT_MYSQL_PASSWORD:-PENDING_REIMBURSEMENT_MYSQL_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${REIMBURSEMENT_MYSQL_ROOT_PASSWORD:-PENDING_REIMBURSEMENT_MYSQL_ROOT_PASSWORD}
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_unicode_ci", "--log-bin-trust-function-creators=1"]
+    volumes:
+      - reimbursement-mysql-data:/var/lib/mysql
+      - ./backups:/backups
+    networks: [default]
+    healthcheck:
+      test: ["CMD-SHELL", "MYSQL_PWD=\"$${MYSQL_PASSWORD}\" mysql --protocol=TCP -h 127.0.0.1 -u\"$${MYSQL_USER}\" -D \"$${MYSQL_DATABASE}\" -Nse 'SELECT 1'"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    restart: unless-stopped
+
+  reimbursement-migrate:
+    image: ${REIMBURSEMENT_IMAGE:-reimbursement/backend:local}
+    build:
+      context: ../reimbursement
+      dockerfile: Dockerfile
+    env_file:
+      - path: ${REIMBURSEMENT_RUNTIME_ENV_FILE:-docker/.env.reimbursement.local}
+        required: false
+    entrypoint: ["/app/reimbursement-migrate"]
+    profiles: ["reimbursement-release"]
+    networks: [default]
+    depends_on:
+      reimbursement-mysql:
+        condition: service_healthy
+    restart: "no"
+
+  reimbursement-catalog-sync:
+    image: ${REIMBURSEMENT_IMAGE:-reimbursement/backend:local}
+    build:
+      context: ../reimbursement
+      dockerfile: Dockerfile
+    env_file:
+      - path: ${REIMBURSEMENT_RUNTIME_ENV_FILE:-docker/.env.reimbursement.local}
+        required: false
+    entrypoint: ["/app/reimbursement-authz-catalog", "publish"]
+    profiles: ["reimbursement-release"]
+    networks: [default]
+    restart: "no"
+
+  reimbursement-api:
+    profiles: ["reimbursement"]
+    image: ${REIMBURSEMENT_IMAGE:-reimbursement/backend:local}
+    build:
+      context: ../reimbursement
+      dockerfile: Dockerfile
+    env_file:
+      - path: ${REIMBURSEMENT_RUNTIME_ENV_FILE:-docker/.env.reimbursement.local}
+        required: false
+      - path: runtime/license-reimbursement-api.env
+        required: false
+    environment:
+      HTTP_ADDRESS: :8087
+    entrypoint: ["/app/reimbursement-api"]
+    volumes:
+      - license-state-reimbursement-api:/var/lib/commercial-license
+      - ./data/keys/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
+    networks: [default]
+    depends_on:
+      reimbursement-mysql:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    labels:
+      com.basic-platform.discovery: "v1"
+      com.basic-platform.application_code: reimbursement
+      com.basic-platform.application_name: 报销管理系统
+      com.basic-platform.environment: ${REIMBURSEMENT_SUBSYSTEM_ENVIRONMENT:-dev}
+      com.basic-platform.service_name: reimbursement-api
+      com.basic-platform.service_role: business
+      com.basic-platform.internal_host: reimbursement-api
+      com.basic-platform.internal_port: "8087"
+      com.basic-platform.protocol: http
+      com.basic-platform.health_endpoint: /healthz
+      com.basic-platform.path_prefix: /reimbursement
+      com.basic-platform.oidc_callback_path: /reimbursement/auth/callback
+      com.basic-platform.oidc_callback_supported: "true"
+      com.basic-platform.version: ${RELEASE_VERSION:-production}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8087/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 10s
+    restart: unless-stopped
+
+  reimbursement-worker:
+    profiles: ["reimbursement"]
+    image: ${REIMBURSEMENT_IMAGE:-reimbursement/backend:local}
+    build:
+      context: ../reimbursement
+      dockerfile: Dockerfile
+    env_file:
+      - path: ${REIMBURSEMENT_RUNTIME_ENV_FILE:-docker/.env.reimbursement.local}
+        required: false
+      - path: runtime/license-reimbursement-worker.env
+        required: false
+    entrypoint: ["/app/reimbursement-worker"]
+    volumes:
+      - license-state-reimbursement-worker:/var/lib/commercial-license
+      - ./data/keys/jwt-ed25519-public.pem:/app/data/keys/jwt-ed25519-public.pem:ro
+    networks: [default]
+    depends_on:
+      reimbursement-mysql:
+        condition: service_healthy
+      reimbursement-api:
+        condition: service_healthy
+    labels:
+      com.basic-platform.discovery: "v1"
+      com.basic-platform.application_code: reimbursement
+      com.basic-platform.application_name: 报销管理系统
+      com.basic-platform.environment: ${REIMBURSEMENT_SUBSYSTEM_ENVIRONMENT:-dev}
+      com.basic-platform.service_name: reimbursement-worker
+      com.basic-platform.service_role: worker
+      com.basic-platform.internal_host: reimbursement-worker
+      com.basic-platform.internal_port: "9097"
+      com.basic-platform.protocol: http
+      com.basic-platform.health_endpoint: /healthz
+      com.basic-platform.oidc_callback_supported: "false"
+      com.basic-platform.version: ${RELEASE_VERSION:-production}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:9097/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    restart: unless-stopped
+  # END SUBSYSTEM: reimbursement — 报销管理 结束
+
+
 volumes:
+  reimbursement-mysql-data:
+  license-state-reimbursement-api:
+  license-state-reimbursement-worker:
   license-state-contract-api:
   license-state-contract-worker:
   license-state-settlement-api:

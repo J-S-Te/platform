@@ -933,7 +933,7 @@ func (handler *SubsystemOnboardingHandler) updateSubsystem(writer stdhttp.Respon
 // 都重新下发，避免旧环境继续使用占位值或失效密钥。
 func requiresCatalogPublisherCredential(applicationCode string) bool {
 	switch applicationCode {
-	case "contract_management", "customer_and_opportunity", "customer_portal", "data_analysis", "project_management", "settlement":
+	case "reimbursement", "contract_management", "customer_and_opportunity", "customer_portal", "data_analysis", "project_management", "settlement":
 		return true
 	default:
 		return false

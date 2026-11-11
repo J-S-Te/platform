@@ -71,7 +71,7 @@ sudo bash ./服务器一键离线部署.sh \
 
 verifier和trust目录必须在待验介质之外；验签在执行任何介质脚本、依赖安装和目标变更前完成。正式安装保留相同验签参数并去掉 `--check-only`；恢复也保留原参数。该门禁不适用于 `--check-delivery`/`--status`，不能把它们合并成一次正式验签。
 
-当前平台组件登记支持内置目录 V2 及 V1 桥接；商业 JWS 和签名快照仍为协议 1。V2 普通镜像更新保持组件身份；遗留 V1 批准发布走独立审核/发布器。交付结构检查器会读取 `release-manifest.json` 与配套证明，按应用的 `registration_protocols` 分别检查：V2 用当前目录的完整组件、实际镜像及六份生产 profile 绑定，不额外要求目标 V1 批准和目标 evidence；V1 应用继续校验对应原材料。合法的跨应用 V1/V2 发行可以共存，同一应用内矛盾、未知版本或缺组件则拒绝。
+当前平台组件登记支持内置目录 V2 及 V1 桥接；商业 JWS 和签名快照仍为协议 1。V2 普通镜像更新保持组件身份；遗留 V1 批准发布走独立审核/发布器。交付结构检查器会读取 `release-manifest.json` 与配套证明，按应用的 `registration_protocols` 分别检查：V2 用当前目录的完整组件、实际镜像及七份生产 profile 绑定，不额外要求目标 V1 批准和目标 evidence；V1 应用继续校验对应原材料。合法的跨应用 V1/V2 发行可以共存，同一应用内矛盾、未知版本或缺组件则拒绝。
 
 有发行证明时，检查器还会核对全部 artifact 大小/摘要、总 SHA 与原始/normalized/资产 profile 字节；目录和总 TAR 均支持白名单内 `profiles/`、`attestations/`，不执行介质代码。Statement 与 bundle 须为合法严格 JSON，并核对现行 Go 协议中的类型、subject、签名材料编码及原始载荷/消息摘要绑定；破损封装不能显示结构 READY。没有发行清单的旧介质保留原材料规则，不完整或损坏证明不能被忽略降级。`authority.release-signature` 仍为待受信 verifier 验证：本入口不验证签名真实性、构建者身份或信任策略，不建立发行信任；显式安装计划的独立旧安装基线、实例许可证、迁移资格和自然 ACK 也各自保留。详见[授权总览](../../../sharedDocs/09_商业授权/README.md)。
 

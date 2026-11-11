@@ -34,7 +34,7 @@ scope_service_for() {
     frontend) printf '%s\n' frontend ;;
     customer-opportunity) printf '%s\n' customer-api ;;
     customer-portal) printf '%s\n' portal-api ;;
-    contract|project|settlement|data-analysis) printf '%s-api\n' "$1" ;;
+    contract|project|reimbursement|settlement|data-analysis) printf '%s-api\n' "$1" ;;
     *) printf '未知系统：%s\n' "$1" >&2; return 1 ;;
   esac
 }
@@ -96,7 +96,7 @@ scope_report() {
     [[ -n "$id" && -n "$service" ]] || continue
     if ! grep -Fxq "$service" <<< "$services"; then
       printf '部署范围差异：现有容器 %s / %s 已不在 YAML 中；未自动停止。\n' "$id" "$service" >&2
-      for module in contract project customer-opportunity customer-portal settlement data-analysis; do
+      for module in contract project reimbursement customer-opportunity customer-portal settlement data-analysis; do
         if scope_owned_services "$module" | grep -Fxq "$service"; then
           printf '显式停用并保留数据：./bin/deploy.sh disable %s\n' "$module" >&2
           break

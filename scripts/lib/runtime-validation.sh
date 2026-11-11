@@ -238,6 +238,9 @@ runtime_target_environment() {
 	printf '%s' "$subsystem_environment"
 }
 
+# 用途：按当前接入配置同步各子系统的发现环境标签。
+# 参数：无；读取各本地运行文件。
+# 返回值：无；通过环境变量供Compose消费。
 sync_local_subsystem_environment_exports() {
 	export CONTRACT_SUBSYSTEM_ENVIRONMENT="$(runtime_target_environment "$contract_env_file" contract_management OIDC_CLIENT_ID)"
 	export CUSTOMER_SUBSYSTEM_ENVIRONMENT="$(runtime_target_environment "$customer_env_file" customer_and_opportunity OIDC_CLIENT_ID)"
@@ -245,6 +248,9 @@ sync_local_subsystem_environment_exports() {
 	export PROJECT_SUBSYSTEM_ENVIRONMENT="$(runtime_target_environment "$project_env_file" project_management OIDC_CLIENT_ID)"
 	export DATA_ANALYSIS_SUBSYSTEM_ENVIRONMENT="$(runtime_target_environment "$data_analysis_env_file" data_analysis OIDC_CLIENT_ID)"
 	export SETTLEMENT_SUBSYSTEM_ENVIRONMENT="$(runtime_target_environment "$settlement_env_file" settlement OIDC_CLIENT_ID)"
+	local reimbursement_runtime="${reimbursement_env_file:-${project_root}/docker/.env.reimbursement.local}"
+	export REIMBURSEMENT_SUBSYSTEM_ENVIRONMENT="$(runtime_target_environment \
+		"$reimbursement_runtime" reimbursement OIDC_CLIENT_ID)"
 }
 
 validate_authorization_context_wiring() {

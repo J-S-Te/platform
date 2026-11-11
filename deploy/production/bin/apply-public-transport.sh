@@ -49,6 +49,9 @@ persist_transport_state() {
   fi
   chmod "$mode" "$temporary"
   mv -f -- "$temporary" "$runtime_file"
+  # 协议切换会改变 PUBLIC_PLATFORM_ORIGIN / Secure Cookie 等部署期计算值：与状态同批写回 .env，
+  # 否则切换后任何绕过本脚本的 compose 调用都会因必填变量缺失而失败（或用到旧值）。
+  public_transport_persist "$runtime_file" || { echo '公开传输配置无法持久化到 .env，切换中止' >&2; return 1; }
 }
 
 current_container_mode() {

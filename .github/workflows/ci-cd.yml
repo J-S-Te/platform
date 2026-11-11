@@ -185,6 +185,8 @@ jobs:
           bash deploy/production/bin/test-subsystem-state-machine.sh
           bash deploy/production/bin/test-offline-import.sh
           bash deploy/production/bin/test-verify-readiness.sh
+          # 部署期公开传输值的持久化回归（现场事故：绕过 deploy.sh 的 compose up 取到 localhost/Secure 默认值）。
+          bash deploy/production/bin/test-public-transport-persist.sh
           bash deploy/production/tests/test-key-init.sh
           bash deploy/production/tests/test_prune_backups.sh
           bash deploy/production/tests/test-backup-retention.sh

@@ -36,7 +36,7 @@ BUNDLE_FILES = RELEASES | {'license-evidence.json', 'upgrade-before.json',
                           'upgrade-review.json', 'approval-review.json'}
 # 结算及门户文件仅为兼容旧版而逐字节保留，不属于此四应用升级入口，绝不在此确认；下方拒绝运行中但未选定的业务容器。
 APPROVAL_FILES = RELEASES | {'runtime-license-customer_portal-prod.json',
-    'runtime-license-settlement-prod.json', 'license-evidence.json', 'license-migration-evidence.json'}
+    'runtime-license-settlement-prod.json', 'runtime-license-reimbursement-prod.json', 'license-evidence.json', 'license-migration-evidence.json'}
 # 此发布器刻意限定为已审核的四系统升级边界，不是通用安装或退役工具。
 EXCLUDED = {'docker-socket-proxy', 'contract-mysql', 'file-gateway-mysql', 'keycloak-backup-metrics',
     'prometheus', 'keycloak', 'platform-mysql', 'customer-mysql', 'temporal', 'keycloak-db',

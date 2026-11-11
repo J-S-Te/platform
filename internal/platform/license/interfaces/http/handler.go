@@ -209,7 +209,7 @@ func (h *Handler) Status(w http.ResponseWriter, r *http.Request) {
 	// runtimeReads 统计本次请求内真正读到协调状态的应用数（含“未登记”），
 	// 用于把顶层 runtime_enforcement 从“是否注入”修正为“实际可用性”。
 	runtimeReads := 0
-	for _, code := range []string{"contract_management", "customer_and_opportunity", "project_management", "settlement", "data_analysis", "customer_portal"} {
+	for _, code := range []string{"contract_management", "customer_and_opportunity", "project_management", "settlement", "data_analysis", "customer_portal", "reimbursement"} {
 		item := appState{Code: code, Status: "NO_LICENSE"}
 		if st.Current != nil {
 			item.Status = "NOT_PURCHASED"

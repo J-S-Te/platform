@@ -146,3 +146,17 @@ func TestValidateStoredContentRejectsMacroAndExecutableArchiveMembers(t *testing
 		}
 	}
 }
+
+// TestReimbursementArchiveJSONValidation 验证归档清单JSON完整可解析且不接受拼接或损坏内容。
+// 参数：t为测试上下文。
+// 返回值：无；非法JSON被接受时测试失败。
+func TestReimbursementArchiveJSONValidation(t *testing.T) {
+	if err := validateStoredContent("application/json", bytes.NewReader([]byte(`{"files":[]}`))); err != nil {
+		t.Fatal(err)
+	}
+	for _, raw := range []string{`{"files":`, `{} {}`, `<html>not-json</html>`} {
+		if err := validateStoredContent("application/json", bytes.NewReader([]byte(raw))); err == nil {
+			t.Fatal("invalid archive JSON accepted")
+		}
+	}
+}

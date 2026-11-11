@@ -8,7 +8,7 @@ migration_state=not_started
 # 独立 .env 中，避免发布产物或历史镜像记录携带数据库、OAuth 等敏感配置。
 
 usage() {
-  echo "usage: $0 {frontend|contract|project|settlement} <acr-host>/<namespace>/<image>@sha256:<64-hex-digest>" >&2
+  echo "usage: $0 {frontend|contract|project|reimbursement|settlement} <acr-host>/<namespace>/<image>@sha256:<64-hex-digest>" >&2
   echo "       $0 platform <platform-image@sha256:...> <file-gateway-image@sha256:...> [<socket-proxy-image@sha256:...>]" >&2
   echo "       $0 data-analysis <dashboard-api@sha256:...> <aggregation-worker@sha256:...> <alert-worker@sha256:...> <production-migrate@sha256:...>" >&2
   exit 2
@@ -41,6 +41,7 @@ case "$service" in
   platform) image_key=PLATFORM_IMAGE; file_gateway_image_key=FILE_GATEWAY_IMAGE; docker_socket_proxy_image_key=DOCKER_SOCKET_PROXY_IMAGE ;;
   contract) image_key=CONTRACT_IMAGE ;;
   project) image_key=PROJECT_IMAGE ;;
+  reimbursement) image_key=REIMBURSEMENT_IMAGE ;;
   settlement) image_key=SETTLEMENT_IMAGE ;;
   data-analysis)
     image_key=DATA_ANALYSIS_DASHBOARD_API_IMAGE
@@ -82,6 +83,8 @@ contract_runtime_file="$deploy_dir/runtime/contract.env"
 contract_runtime_template="$deploy_dir/subsystem-templates/contract.env.example"
 project_runtime_file="$deploy_dir/runtime/project.env"
 project_runtime_template="$deploy_dir/subsystem-templates/project.env.example"
+reimbursement_runtime_file="$deploy_dir/runtime/reimbursement.env"
+reimbursement_runtime_template="$deploy_dir/subsystem-templates/reimbursement.env.example"
 settlement_runtime_file="$deploy_dir/runtime/settlement.env"
 settlement_runtime_template="$deploy_dir/subsystem-templates/settlement.env.example"
 data_analysis_runtime_file="$deploy_dir/runtime/data-analysis.env"
@@ -92,6 +95,7 @@ provisioner_refresh_helper="$deploy_dir/bin/provisioner-config-refresh.sh"
 profiles_dir="$deploy_dir/subsystems.d"
 export CONTRACT_RUNTIME_ENV_FILE="$contract_runtime_file"
 export PROJECT_RUNTIME_ENV_FILE="$project_runtime_file"
+export REIMBURSEMENT_RUNTIME_ENV_FILE="$reimbursement_runtime_file"
 export SETTLEMENT_RUNTIME_ENV_FILE="$settlement_runtime_file"
 export DATA_ANALYSIS_RUNTIME_ENV_FILE="$data_analysis_runtime_file"
 
@@ -119,6 +123,7 @@ source "$transport_helper"
 # shellcheck source=provisioner-config-refresh.sh
 source "$provisioner_refresh_helper"
 public_transport_prepare "$deploy_dir"
+public_transport_persist "$runtime_file" || { echo '公开传输配置无法持久化到 .env，拒绝继续发布' >&2; exit 1; }
 source "$script_dir/compose-scope.sh"
 source "$script_dir/project-background.sh"
 # 即使 config --services 也会展开全部必需镜像变量。仅在提交发布指针前检查范围时使用已验证候选引用，父进程环境保持不变，以供回滚。
@@ -315,6 +320,12 @@ write_service_runtime_dsns() {
       password="$(dsn_env_value PROJECT_MYSQL_PASSWORD)"
       dsn="project:${password:-PENDING_PROJECT_MYSQL_PASSWORD}@tcp(project-mysql:3306)/project_management?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci"
       ;;
+    reimbursement)
+      target="$reimbursement_runtime_file"
+      key=MYSQL_DSN
+      password="$(dsn_env_value REIMBURSEMENT_MYSQL_PASSWORD)"
+      dsn="reimbursement:${password:-PENDING_REIMBURSEMENT_MYSQL_PASSWORD}@tcp(reimbursement-mysql:3306)/reimbursement?parseTime=true&charset=utf8mb4&loc=UTC"
+      ;;
     settlement)
       target="$settlement_runtime_file"
       key="SETTLEMENT_MYSQL_DSN"
@@ -376,6 +387,10 @@ case "$service" in
     prepare_runtime_file "$project_runtime_file" "$project_runtime_template" "项目管理服务"
     write_service_runtime_dsns project
     ;;
+  reimbursement)
+    prepare_runtime_file "$reimbursement_runtime_file" "$reimbursement_runtime_template" "报销服务"
+    write_service_runtime_dsns reimbursement
+    ;;
   settlement)
     prepare_runtime_file "$settlement_runtime_file" "$settlement_runtime_template" "结算服务"
     write_service_runtime_dsns settlement
@@ -387,6 +402,7 @@ case "$service" in
 esac
 # 传输协调器持有同一把锁，将切换状态持久化到运行文件。等待获得锁后重新读取，防止仅服务部署因旧变量而误丢弃排空覆盖配置。
 public_transport_prepare "$deploy_dir"
+public_transport_persist "$runtime_file" || { echo '公开传输配置无法持久化到 .env，拒绝继续发布' >&2; exit 1; }
 ensure_application_network
 
 compose() {
@@ -1829,6 +1845,46 @@ deploy_project() {
   project_background_activate || return 1
 }
 
+# reimbursement_runtime_ready 核验报销首次发布及实际部署所需的完整运行材料。
+# 参数：无；仅使用受控发布上下文中的运行文件路径。
+# 返回值：全部材料已配置返回零，文件缺失或占位材料返回非零。
+reimbursement_runtime_ready() {
+  [[ -f "$reimbursement_runtime_file" ]] || return 1
+  local key value
+  for key in \
+    MYSQL_DSN PUBLIC_BASE_URL PLATFORM_BASE_URL PLATFORM_ENVIRONMENT_CODE \
+    OIDC_ISSUER OIDC_CLIENT_ID OIDC_CLIENT_SECRET OIDC_TENANT_ID OIDC_REDIRECT_URI \
+    OIDC_SESSION_ENCRYPTION_KEY_BASE64 \
+    PROJECT_REFERENCE_CLIENT_ID PROJECT_REFERENCE_CLIENT_SECRET \
+    PROJECT_SPEND_CLIENT_ID PROJECT_SPEND_CLIENT_SECRET \
+    FILE_GATEWAY_CLIENT_ID FILE_GATEWAY_CLIENT_SECRET \
+    PLATFORM_AUDIT_CLIENT_ID PLATFORM_AUDIT_CLIENT_SECRET \
+    PLATFORM_AUTHORIZATION_CATALOG_APPLICATION_ID \
+    PLATFORM_AUTHORIZATION_CATALOG_CLIENT_ID \
+    PLATFORM_AUTHORIZATION_CATALOG_CLIENT_SECRET; do
+    value="$(awk -F= -v key="$key" '$1==key {sub(/^[^=]*=/, ""); print; exit}' "$reimbursement_runtime_file")"
+    if [[ -z "$value" || "$value" == PENDING_* || "$value" == REPLACE_WITH_* ]]; then
+      echo "报销运行配置未就绪：$key" >&2
+      return 1
+    fi
+  done
+}
+
+# deploy_reimbursement 以真实备份和独立目录发布推进报销API与Worker。
+# 参数：无；镜像及受控runtime由当前发布上下文提供。
+# 返回值：全部步骤成功返回0，缺凭据、备份或许可失败即停止。
+deploy_reimbursement() {
+  reimbursement_runtime_ready || return 1
+  compose up -d --wait --wait-timeout "${BASIC_PLATFORM_DB_START_TIMEOUT:-600}" reimbursement-mysql || return
+  require_mysql_ready reimbursement-mysql "${BASIC_PLATFORM_DB_START_TIMEOUT:-600}" || return
+  backup_database reimbursement-mysql reimbursement reimbursement || return
+  compose run --rm --no-deps -e REIMBURSEMENT_MIGRATION_BACKUP_VERIFIED=true reimbursement-migrate || return
+  compose run --rm --no-deps reimbursement-catalog-sync || return
+  compose up -d --force-recreate --no-deps --wait --wait-timeout 180 reimbursement-api reimbursement-worker || return
+  verify_service_image compose reimbursement-api "$image_ref" || return
+  verify_service_image compose reimbursement-worker "$image_ref" || return
+}
+
 deploy_settlement() {
   # Settlement 的浏览器会话和权限目录必须先由平台接入流程写入 runtime 文件；
   # 不能用空 Client 启动后再让 API 以 401 循环重试。
@@ -2070,6 +2126,7 @@ rollback_runtime() {
       ;;
     contract) restored_images+=("$(release_image_value CONTRACT_IMAGE)") ;;
     project) restored_images+=("$(release_image_value PROJECT_IMAGE)") ;;
+    reimbursement) restored_images+=("$(release_image_value REIMBURSEMENT_IMAGE)") ;;
     settlement) restored_images+=("$(release_image_value SETTLEMENT_IMAGE)") ;;
     data-analysis)
       for restored_image_key in \
@@ -2139,6 +2196,7 @@ rollback_runtime() {
       verify_service_image compose project-sla-notifier "$restored_project_image" || return 1
       project_background_activate || return 1
       ;;
+    reimbursement) compose up -d --force-recreate --no-deps reimbursement-api reimbursement-worker ;;
     settlement) compose up -d --force-recreate --no-deps settlement-api settlement-worker ;;
     data-analysis)
       compose up -d --force-recreate --no-deps \
@@ -2301,6 +2359,19 @@ if [[ "$service" == "project" ]] && ! project_runtime_ready; then
   rm -f "$previous_release"
   echo "项目管理镜像已安全暂存：$image_ref"
   echo "运行凭据尚未生成，请登录基础平台的“应用接入”页面完成 project_management/prod 接入。"
+  exit 0
+fi
+if [[ "$service" == "reimbursement" ]] && ! reimbursement_runtime_ready; then
+  if [[ "$fail_if_runtime_not_ready" == "true" ]]; then
+    mv -f "$previous_release" "$release_file"
+    refresh_subsystem_provisioner_config || true
+    echo "报销运行配置未完成，拒绝将仅暂存报告为发布成功" >&2
+    echo "请先登录基础平台的“应用接入”页面完成 reimbursement/prod 接入，再重新发布" >&2
+    exit 1
+  fi
+  rm -f "$previous_release"
+  echo "报销镜像已安全暂存：$image_ref"
+  echo "运行凭据尚未生成，请登录基础平台的“应用接入”页面完成 reimbursement/prod 接入。"
   exit 0
 fi
 if [[ "$service" == "settlement" ]] && ! settlement_runtime_ready; then

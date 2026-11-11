@@ -19,6 +19,7 @@ PROFILES = {
     "project": ("project_management", "project_management-prod.yaml"),
     "customer-opportunity": ("customer_and_opportunity", "customer_and_opportunity-prod.yaml"),
     "customer-portal": ("customer_portal", "customer_portal-prod.yaml"),
+    "reimbursement": ("reimbursement", "reimbursement-prod.yaml"),
     "settlement": ("settlement", "settlement-prod.yaml"),
     "data-analysis": ("data_analysis", "data-analysis-prod.yaml"),
 }

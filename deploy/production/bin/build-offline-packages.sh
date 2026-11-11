@@ -72,6 +72,7 @@ runtime_approval_files=(
   runtime-license-customer_and_opportunity-prod.json
   runtime-license-customer_portal-prod.json
   runtime-license-project_management-prod.json
+  runtime-license-reimbursement-prod.json
   runtime-license-settlement-prod.json
   runtime-license-data_analysis-prod.json
 )
@@ -166,7 +167,7 @@ if [[ "$portal_directory_mode" == local && " $selected_optional_components " == 
 fi
 [[ "$reuse_approved_crm_image" != true || ( -n "$runtime_approval_dir" && "$runtime_approval_approved" == true ) ]] || { echo '复用CRM镜像需要已审核运行批准' >&2; exit 2; }
 [[ -z "$installation_scenario" || -n "$runtime_approval_dir" ]] || { echo '四场景安装必须提供已批准目录' >&2; exit 2; }
-case "$component" in common|platform|frontend|customer-opportunity|customer-portal|contract|project|settlement|data-analysis|host-deps|assets|all) ;; *) usage >&2; exit 2 ;; esac
+case "$component" in common|platform|frontend|customer-opportunity|customer-portal|contract|project|reimbursement|settlement|data-analysis|host-deps|assets|all) ;; *) usage >&2; exit 2 ;; esac
 for build_setting in "$build_goproxy" "$build_gosumdb" "$build_npm_registry"; do
   [[ -n "$build_setting" && "$build_setting" != *$'\n'* && "$build_setting" != *$'\r'* ]] || {
     echo '依赖下载地址不能为空或包含换行符' >&2
@@ -308,7 +309,7 @@ if [[ -n "$runtime_approval_dir" ]]; then
       echo '生产部署资产只接受 production 安装环境许可证（应用环境为 prod）' >&2; exit 2;
     }
     while IFS= read -r approval_app; do
-      case "$approval_app" in contract_management|customer_and_opportunity|customer_portal|project_management|settlement|data_analysis) ;; *) echo '许可证包含不支持的运行批准系统' >&2; exit 2 ;; esac
+      case "$approval_app" in contract_management|customer_and_opportunity|customer_portal|project_management|reimbursement|settlement|data_analysis) ;; *) echo '许可证包含不支持的运行批准系统' >&2; exit 2 ;; esac
       [[ -f "$license_stage/approvals/runtime-license-${approval_app}-prod.json" ]] || {
         echo "许可证系统缺少对应运行批准：$approval_app" >&2; exit 2;
       }
@@ -923,6 +924,11 @@ if want project; then
   build_image "$workspace_root/project_management" "$workspace_root/project_management/Dockerfile" "$tag"
   package_images project project-backend "$tag"
 fi
+if want reimbursement; then
+  tag="uip-package/reimbursement-backend:$version"
+  build_image "$workspace_root/reimbursement" "$workspace_root/reimbursement/Dockerfile" "$tag"
+  package_images reimbursement reimbursement-backend "$tag"
+fi
 if want settlement; then
   tag="uip-package/settlement-backend:$version"
   build_image "$workspace_root/Settlement" "$workspace_root/Settlement/Dockerfile" "$tag"
@@ -945,7 +951,7 @@ selected_component() {
 
 disabled_compose_modules() {
   local component module
-  for mapping in customer-opportunity:customer customer-portal:portal contract:contract project:project settlement:settlement data-analysis:data-analysis; do
+  for mapping in customer-opportunity:customer customer-portal:portal contract:contract project:project reimbursement:reimbursement settlement:settlement data-analysis:data-analysis; do
     component="${mapping%%:*}"
     module="${mapping#*:}"
     selected_component "$component" || printf '%s\n' "$module"
@@ -955,7 +961,7 @@ disabled_compose_modules() {
 # 本批实际交付的可选子系统模块：投影后必须仍为 enabled，否则受控升级会判"未启用"。
 enabled_compose_modules() {
   local component module
-  for mapping in customer-opportunity:customer customer-portal:portal contract:contract project:project settlement:settlement data-analysis:data-analysis; do
+  for mapping in customer-opportunity:customer customer-portal:portal contract:contract project:project reimbursement:reimbursement settlement:settlement data-analysis:data-analysis; do
     component="${mapping%%:*}"
     module="${mapping#*:}"
     selected_component "$component" && printf '%s\n' "$module"
@@ -982,7 +988,7 @@ package_assets() (
     bin/set-container-timezone.sh bin/test-container-timezone.sh CONTAINER_TIMEZONE.md
     bin/test-auto-install-packages.sh bin/test-compose-scope.sh bin/test-deployment-parity.sh bin/test-doctor.sh bin/test-project-background.py
     bin/test-file-gateway-wiring.sh bin/test-lifecycle.sh bin/test-offline-configure.sh bin/test-offline-import.sh bin/test-offline-registry-network.sh
-    bin/test-offline-package-metadata.sh bin/test-offline-transport.sh bin/test-public-transport.sh bin/test-start-enabled.sh
+    bin/test-offline-package-metadata.sh bin/test-offline-transport.sh bin/test-public-transport.sh bin/test-public-transport-persist.sh bin/test-start-enabled.sh
     bin/test-backup-recovery-safety.sh bin/test-control-plane-reload.sh bin/test-release-reliability.sh bin/test-deployment-plan.py bin/test-first-failure.sh bin/test-recovery-status.sh bin/test-subsystem-state-machine.sh bin/test-verify-readiness.sh
     bin/test-database-dependent-refresh.sh bin/test-keycloak-probe.sh
     monitoring/prometheus/file-gateway-alerts.yml monitoring/prometheus/integration-alerts.yml monitoring/prometheus/keycloak-alerts.yml monitoring/prometheus/platform-alerts.yml monitoring/prometheus/prometheus.yml
@@ -991,6 +997,7 @@ package_assets() (
     subsystem-templates/portal.env.example subsystem-templates/portal-report-worker.env.example subsystem-templates/project.env.example subsystem-templates/settlement.env.example
     subsystems.d/contract_management-prod.yaml subsystems.d/customer_and_opportunity-prod.yaml
     subsystems.d/customer_portal-prod.yaml subsystems.d/data-analysis-prod.yaml subsystems.d/project_management-prod.yaml
+    subsystems.d/reimbursement-prod.yaml subsystem-templates/reimbursement.env.example
     subsystems.d/settlement-prod.yaml tests/preflight-test.sh tests/test-acceptance-evidence.sh tests/test-assets-install.sh tests/test-compose-blocks.py
     tests/test-host-dependencies.sh tests/test-offline-package-builder.sh tests/test-offline-image-identities.py
     tests/test-frontend-modes.sh tests/test-key-init.sh tests/test-metabase-init.sh tests/test-deployment-compatibility.py

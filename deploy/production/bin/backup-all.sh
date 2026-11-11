@@ -70,7 +70,7 @@ def read(path):
     return raw
 names={'license-evidence.json','license-migration-evidence.json'} | {
     'runtime-license-'+app+'-prod.json' for app in ('contract_management','customer_and_opportunity',
-    'customer_portal','project_management','settlement','data_analysis')}
+    'customer_portal','project_management','reimbursement','settlement','data_analysis')}
 def snapshot(root):
     checked(root, True)
     authority=root/'runtime-approvals'
@@ -440,7 +440,7 @@ cleanup_work() {
 trap cleanup_work EXIT
 
 compose=(docker compose --project-directory "$deploy_dir" --file "$deploy_dir/docker-compose.yml" --env-file "$runtime_file" --env-file "$release_file")
-services=(platform-mysql keycloak-db customer-mysql portal-mysql contract-mysql project-mysql settlement-mysql data-analysis-mysql)
+services=(platform-mysql keycloak-db customer-mysql portal-mysql contract-mysql project-mysql reimbursement-mysql settlement-mysql data-analysis-mysql)
 configured_services="$("${compose[@]}" config --services)" || { echo 'cannot validate Compose for database backup' >&2; exit 1; }
 database_volume_for_service() {
   case "$1" in
@@ -450,6 +450,7 @@ database_volume_for_service() {
     portal-mysql) printf portal-mysql-data ;;
     contract-mysql) printf contract-mysql-data ;;
     project-mysql) printf project-mysql-data ;;
+    reimbursement-mysql) printf reimbursement-mysql-data ;;
     settlement-mysql) printf settlement-mysql-data ;;
     data-analysis-mysql) printf data-analysis-mysql-data ;;
   esac

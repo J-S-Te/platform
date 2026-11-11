@@ -292,6 +292,59 @@ public_transport_prepare() {
   export PUBLIC_KEYCLOAK_ISSUER="${PUBLIC_SSO_ORIGIN}/realms/${realm}"
 }
 
+# 公开传输键在部署期才能算出（主机/端口/HTTPS 开关组合），编排侧用 Compose 必填语法（:?）
+# 要求它们显式存在。因此部署脚本必须把最终解析值持久化到部署目录的运行配置，否则任何绕过
+# deploy.sh 的 `docker compose --env-file .env --env-file .release.env up -d` 都会直接失败，
+# 或（去掉必填语法前的现场事故）静默回落到 localhost 与 Secure Cookie=true。
+#
+# 参数：$1 运行配置文件（部署目录的 .env，0600）。
+# 返回值：写入并自校验成功返回 0；目标不是普通文件、无可持久化值或写入失败返回非 0。
+public_transport_persist() {
+  local file="$1" mode temporary line key value desired=()
+  local managed='PUBLIC_PLATFORM_ORIGIN PUBLIC_SSO_ORIGIN PUBLIC_KEYCLOAK_ISSUER PUBLIC_FRONTEND_SSO_HOST
+    PUBLIC_TRANSPORT_COOKIE_SECURE PUBLIC_TRANSPORT_ALLOW_INSECURE_HTTP
+    PUBLIC_TRANSPORT_KEYCLOAK_REQUIRE_HTTPS'
+  [[ -n "$file" ]] || { public_transport_fail '缺少公开传输持久化目标运行配置' || return 1; }
+  if [[ -L "$file" || ! -f "$file" ]]; then
+    public_transport_fail "公开传输持久化目标必须是普通文件（拒绝符号链接）：${file}" || return 1
+  fi
+  # 未解析的值不写入：由编排的必填校验失败关闭，绝不写猜测值或默认值。
+  for key in $managed; do
+    value="${!key:-}"
+    [[ -n "$value" ]] || continue
+    [[ "$value" != *$'\n'* ]] || { public_transport_fail "拒绝写入含换行的 ${key}" || return 1; }
+    desired+=("${key}=${value}")
+  done
+  ((${#desired[@]} > 0)) || { public_transport_fail '没有可持久化的公开传输值（是否先执行 public_transport_prepare？）' || return 1; }
+  # 幂等：运行配置已与解析结果一致时不改写。.env 是容器单文件 bind mount，
+  # 无谓替换只会制造 inode 漂移。
+  local changed=false
+  for line in "${desired[@]}"; do
+    key="${line%%=*}"
+    [[ "$(public_transport_env_value "$file" "$key")" == "${line#*=}" ]] || { changed=true; break; }
+  done
+  if [[ "$changed" == true ]]; then
+    mode="$(stat -c '%a' "$file")" || { public_transport_fail "无法读取 ${file} 权限" || return 1; }
+    temporary="$(mktemp "${file}.transport.XXXXXX")" || { public_transport_fail "无法在 ${file} 旁创建临时文件" || return 1; }
+    # 保留非托管键与注释，仅原位替换/追加托管键（与 persist_transport_state 同一写法）。
+    awk -F= -v managed="$managed" '
+      BEGIN { count = split(managed, list, /[[:space:]]+/); for (i = 1; i <= count; i++) if (list[i] != "") skip[list[i]] = 1 }
+      $0 !~ /^[[:space:]]*#/ && $1 in skip { next }
+      { print }
+    ' "$file" >"$temporary" || { rm -f -- "$temporary"; public_transport_fail "无法读取 ${file}" || return 1; }
+    printf '%s\n' "${desired[@]}" >>"$temporary" || { rm -f -- "$temporary"; public_transport_fail "无法写入临时运行配置" || return 1; }
+    chmod "$mode" "$temporary" || { rm -f -- "$temporary"; public_transport_fail "无法设置临时运行配置权限" || return 1; }
+    mv -f -- "$temporary" "$file" || { rm -f -- "$temporary"; public_transport_fail "无法替换运行配置：${file}" || return 1; }
+  fi
+  # 自校验：回读确认落盘值等于解析结果，避免“看起来写了但值不对”的静默漂移。
+  for line in "${desired[@]}"; do
+    key="${line%%=*}"
+    [[ "$(public_transport_env_value "$file" "$key")" == "${line#*=}" ]] \
+      || { public_transport_fail "持久化校验失败：${key} 未写入 ${file}" || return 1; }
+  done
+  return 0
+}
+
 public_transport_compose_args() {
   # 协议仍由统一配置派生；显示时区独立覆盖，不改业务/数据库配置。
   local argument_name="$1" timezone_file="${deploy_dir:-}/runtime/compose.timezone.yaml"

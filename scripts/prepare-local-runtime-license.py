@@ -83,12 +83,15 @@ def parse_json(raw):
         fail("trusted JSON file could not be parsed")
 
 
+# 用途：读取并校验七个受支持应用的本地许可组件清单。
+# 参数：workspace 为可信工作区根目录。
+# 返回值：应用配置映射；结构、数量或组件配置非法时拒绝。
 def load_manifest(workspace):
     manifest = parse_json(read_regular(workspace / "platform/config/local-license-components.json"))
     if not isinstance(manifest, dict) or set(manifest) != {"version", "applications"} or type(manifest["version"]) is not int or manifest["version"] != 1:
         fail("local component manifest schema is invalid")
     apps = manifest["applications"]
-    if not isinstance(apps, dict) or not apps or len(apps) > 6:
+    if not isinstance(apps, dict) or not apps or len(apps) > 7:
         fail("local component manifest applications are invalid")
     all_services = set()
     for app, target in apps.items():

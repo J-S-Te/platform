@@ -30,6 +30,9 @@ func p1CredentialValues(input application.SubsystemProvisioningInput, purpose, i
 // 参数：input 为登记输入，path 为运行文件，values 接收值，fresh 标识首次接入。
 // 返回值：无错误表示配置完整；否则返回配置或身份错误。
 func (provisioner *LocalDockerSubsystemProvisioner) p1LocalRuntimeValues(input application.SubsystemProvisioningInput, path string, values map[string]string, fresh bool) error {
+	if input.ApplicationCode == "reimbursement" {
+		return reimbursementLocalRuntimeValues(input, path, values, fresh)
+	}
 	if input.ApplicationCode != "contract_management" && input.ApplicationCode != "customer_portal" && input.ApplicationCode != "settlement" && input.ApplicationCode != "project_management" {
 		return nil
 	}
@@ -48,7 +51,10 @@ func (provisioner *LocalDockerSubsystemProvisioner) p1LocalRuntimeValues(input a
 		return provisioningError("read business runtime configuration")
 	}
 	if input.ApplicationCode == "project_management" {
-		return projectSettlementReferenceRuntimeValues(input, values)
+		if err := projectSettlementReferenceRuntimeValues(input, values); err != nil {
+			return err
+		}
+		return projectReimbursementRuntimeValues(input, values)
 	}
 	if input.ApplicationCode == "contract_management" {
 		if err := p1CredentialValues(input, application.ServiceCredentialSettlementContractIngest, "SETTLEMENT_INTEGRATION_CLIENT_ID", "SETTLEMENT_INTEGRATION_CLIENT_SECRET", current, values); err != nil {
@@ -163,11 +169,14 @@ func (provisioner *LocalDockerSubsystemProvisioner) p1LocalRuntimeValues(input a
 // p1ServiceCredentialScopes 是严格机器身份每个用途唯一允许的 scope。
 // 必须覆盖 p1StrictServicePurposes 的全部用途；缺失时校验会因空 scope 判为不匹配。
 var p1ServiceCredentialScopes = map[string]string{
+	application.ServiceCredentialReimbursementProjectReferenceRead:  "reimbursement.project_reference.read",
+	application.ServiceCredentialProjectReimbursementCostWrite:      "project.reimbursement_cost.write",
 	application.ServiceCredentialContractImportReportRead:           "contract.import.report.read",
 	application.ServiceCredentialAnalysisContractImportReportStatus: "analysis.contract-import.report-status",
 	application.ServiceCredentialSettlementProjectReferenceRead:     "settlement.project_reference.read",
 	application.ServiceCredentialOwnerDirectoryRead:                 "owner_directory.read",
 	application.ServiceCredentialNotificationIngest:                 "notification.ingest",
+	application.ServiceCredentialFileGatewayWrite:                   "platform:file:upload",
 	application.ServiceCredentialAuditIngest:                        "audit.ingest",
 	application.ServiceCredentialSettlementContractIngest:           "settlement.contract.ingest",
 	application.ServiceCredentialCRMContractLinkWrite:               "opportunity.signed.write",
@@ -186,7 +195,20 @@ func validateP1ServiceCredential(input application.SubsystemProvisioningInput, p
 		return provisioningError("new business service credential target mismatch")
 	}
 	expectedScope := p1ServiceCredentialScopes[purpose]
-	if len(client.Scopes) != 1 || client.Scopes[0] != expectedScope {
+	scopeValid := len(client.Scopes) == 1 && client.Scopes[0] == expectedScope
+	if purpose == application.ServiceCredentialFileGatewayWrite {
+		scopeValid = len(client.Scopes) == 3
+		for _, required := range []string{"platform:file:upload", "platform:file:bind", "platform:file:download"} {
+			count := 0
+			for _, scope := range client.Scopes {
+				if scope == required {
+					count++
+				}
+			}
+			scopeValid = scopeValid && count == 1
+		}
+	}
+	if !scopeValid {
 		return provisioningError("new business service credential scope mismatch")
 	}
 	if client.ClientID == "" {

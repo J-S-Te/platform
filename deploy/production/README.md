@@ -127,7 +127,7 @@ python3 -c "import ast,sys; [ast.parse(open(p).read()) for p in ['deploy/product
 
 ### 监控抓取与指标端点边界
 
-- `monitoring/prometheus/prometheus.yml` 抓取 `keycloak`、`keycloak-backup`、`file-gateway`、`contract`（`contract-api:8081`）、`platform-api`（`platform-api:8080`，平台自身 `/metrics`）与 `settlement-api`（`settlement-api:8085`）。所有 target 都是 Compose 服务名，只走 `application` 内网，不含宿主机地址。
+- `monitoring/prometheus/prometheus.yml` 抓取 `keycloak`、`keycloak-backup`、`file-gateway`、`contract`（`contract-api:8081`）、`platform-api`（`platform-api:8080`，平台自身 `/metrics`）、`settlement-api`（`settlement-api:8085`）与 `reimbursement-worker`（`reimbursement-worker:9097`）。所有 target 都是 Compose 服务名，只走 `application` 内网，不含宿主机地址。
 - `/metrics` 只由网络层保护：业务服务的指标端口仅允许回环发布（平台 8080、合同 8081、结算 8085），File Gateway 8086、Prometheus 9090、node-exporter 9100 完全不发布端口；前端 nginx 只代理显式业务路径，没有 `/metrics` 路由。禁止为了抓取补 `ports:`，也不要加公网 Ingress/反代。
 - contract 的 `/metrics` 不校验凭据，但只暴露聚合计数（不含租户/合同/事件 id），且与 `/healthz`、`/readyz` 同级注册、不进 `/api/v1`。它的唯一边界就是上面这条网络限制，因此“临时放开抓取端口”不是可接受的排障手段。
 - 平台 `/metrics` 额外有应用层鉴权（`RequireMetricsAccess`，SEC-B4）：配置 `METRICS_ACCESS_TOKEN` 时必须带 `Authorization: Bearer`，未配置时只放行回环对端。因此平台 job 必须用部署方提供的凭据文件抓取，见下一节。结算 `/metrics` 与合同的同级实现一致，不做应用层鉴权。
@@ -351,6 +351,53 @@ cd /opt/unified-identity-platform
 
 本地开发同样支持该开关，配置位于 `platform/docker/.env.local`；默认仍保持 `http://localhost:8081`，只有显式启用 HTTPS 才加载 `platform/compose.https.yaml`。排空状态由协调器提供，`PUBLIC_TRANSPORT_STATE` 是内部恢复字段，不能作为日常开关手工长期保留。
 
+### 1.1.1 部署期公开传输值：失败关闭 + 持久化（PUBLIC-TRANSPORT-FAILCLOSED）
+
+`PUBLIC_PLATFORM_ORIGIN`、`PUBLIC_SSO_ORIGIN`、`PUBLIC_TRANSPORT_COOKIE_SECURE` 和
+`PUBLIC_TRANSPORT_KEYCLOAK_REQUIRE_HTTPS` 只能在部署期算出（取决于公开主机/端口与
+`PUBLIC_HTTPS_ENABLED`）。此前它们只在部署脚本进程内 `export`，编排层却写了
+`${PUBLIC_PLATFORM_ORIGIN:-http://localhost:8081}` / `${PUBLIC_TRANSPORT_COOKIE_SECURE:-true}`。
+现场事故：运维为刷新运行时而执行
+`docker compose --env-file .env --env-file .release.env -f docker-compose.yml up -d --no-deps --force-recreate customer-api`，
+容器因此拿到 `OIDC_REDIRECT_URI=http://localhost:8081/...` 与 `OIDC_SESSION_COOKIE_SECURE=true`：
+明文 HTTP 下浏览器丢弃 Secure Cookie，登录回调 401，用户被永久踢回登录页，而全程没有任何报错。
+
+现在的行为分两层，二者都必须满足：
+
+1. **失败关闭**：`docker-compose.yml`（以及评审副本 `compose.yaml`）对这 4 个键只用 Compose 必填语法
+   `${KEY:?...}`，不再有默认值。缺变量时任何 `docker compose` 调用（含 `config`）直接失败退出：
+   `required variable PUBLIC_PLATFORM_ORIGIN is missing a value: PUBLIC_PLATFORM_ORIGIN 必须由 deploy.sh configure 写入 .env`。
+   `PUBLIC_TRANSPORT_ALLOW_INSECURE_HTTP` / `SUBSYSTEM_ALLOW_INSECURE_HTTP_SESSION` **保留**安全默认
+   （缺省 `false`＝拒绝非回环 HTTP 会话）：缺省方向是安全的，属于有意提供的默认值。
+2. **持久化**：`deploy.sh configure`（含 `--force`）、`apply-public-transport.sh`、
+   `deploy-service.sh`、`deploy-customer-opportunity.sh`、`start-enabled.sh` 在解析成功后调用
+   `public-transport.sh` 的 `public_transport_persist`，把最终值原子写回部署目录的 `.env`
+   （保留 0600 与非托管键；值未变化时不改写，避免 `.env` 单文件 bind mount 换 inode）。
+   因此后续任何 `docker compose --env-file .env --env-file .release.env ...` 调用都能拿到正确值。
+
+一致的诊断与验收：
+
+- `deploy.sh doctor` 的 `[7/8] 公开传输：部署声明、.env 持久化与运行中容器` 会对比
+  “当前解析值 / `.env` 持久化值 / 运行中容器的生效环境变量”，缺失或过期即失败并给出修复命令；
+  `PUBLIC_TRANSPORT_ALLOW_INSECURE_HTTP` 缺失只告警（编排有安全默认），与解析值不一致才失败。
+- `deploy.sh verify` 在打印成功结论前比对运行中 `platform-api`、`contract-api`、`customer-api`、
+  `portal-api`、`project-api`、`settlement-api`、`data-analysis-api` 的
+  `OIDC_REDIRECT_URI` / `*_SESSION_COOKIE_SECURE`；不一致直接失败（健康检查看不到这类故障）。
+
+已产生该事故的部署按以下顺序修复（不要在缺变量时手工 `compose up`）：
+
+```bash
+cd /opt/unified-identity-platform
+sudo ./bin/deploy.sh configure --force     # 重新解析并持久化公开传输值到 .env
+sudo ./bin/deploy.sh doctor                # [7/8] 应无失败项
+sudo ./bin/deploy.sh deploy customer-opportunity   # 按受影响组件重建容器
+sudo ./bin/deploy.sh verify customer-opportunity
+```
+
+回滚：本改动只收紧配置解析与新增只读检查，不改业务代码；需要恢复旧行为时把本节涉及的
+`${KEY:?...}` 改回带默认值的写法即可（不建议——那正是本次缺陷）。已持久化的 `.env` 键可以保留，
+旧版本脚本不会读取它们。
+
 ### 1.2 OAuth Client Secret 吊销灰度（BIZ-RUNTIME-05）
 
 受控更新与许可登记每次签发新 Secret 都会新增一行 ACTIVE 凭据，退役策略由 `AUTH_OAUTH_CLIENT_SECRET_PREVIOUS_RETIREMENT` 决定：`keep`（默认，不退役旧值）/`grace`（把旧值有效期收紧到窗口内）/`revoke`（立即吊销）。默认 `keep` 意味着旧 Secret 永久有效，泄露或容器遗留的 env 仍可换令牌，因此生产要按下面的灰度推进；三种策略的机制都已实现，本节是纯配置与运维流程。
@@ -358,7 +405,7 @@ cd /opt/unified-identity-platform
 运维入口与前置检查：
 
 - 配置键写进部署目录的 `runtime/.env`（`platform/.env.example` 与 `deploy/production/.env.example` 都有带注释的模板），`platform-api` 与 `platform-worker` 都从该文件读取；改值后受控重启这两个服务。取值非法时进程拒绝启动（fail-closed），不是静默降级成 `keep`。
-- `./bin/deploy.sh doctor` 新增只读检查 `[6/7] 旧 OAuth Client Secret 退役策略`：键缺失、取值非法、`grace` 缺窗口或窗口超出 `(0, 720h]` 都会给出 `[警告]`（不阻断部署）；`keep`/`revoke`/合法 `grace` 给出 `[OK]`，用于确认“以为开了灰度、实际还是 keep”的情况。
+- `./bin/deploy.sh doctor` 新增只读检查 `[6/8] 旧 OAuth Client Secret 退役策略`：键缺失、取值非法、`grace` 缺窗口或窗口超出 `(0, 720h]` 都会给出 `[警告]`（不阻断部署）；`keep`/`revoke`/合法 `grace` 给出 `[OK]`，用于确认“以为开了灰度、实际还是 keep”的情况。
 - `AUTH_OAUTH_CLIENT_SECRET_PREVIOUS_GRACE` 只对 `grace` 生效，取 Go duration 字面量（如 `24h`，上限 `720h` = 30 天）；`30d` 这类写法会被拒绝。`keep`/`revoke` 下该键被忽略。
 
 **Phase 0 盘点（只读，不改库）**：先看 `/metrics`（`RequireMetricsAccess` 保护，10s 抓取缓存）：
@@ -389,7 +436,7 @@ cd /opt/unified-identity-platform
 
 灰度回滚：把配置改回 `keep` 并重启即可停止继续退役；**已 REVOKE 的 Secret 不复活**（fail-closed），已收紧的 `valid_until` 也不会被回滚延长，需要恢复可用性只能重新签发新值。该灰度不涉及表结构迁移。
 
-**发现与监控清单**：`keep` 是默认值且不阻断部署，所以“可发现”依赖三件事——`deploy.sh doctor` 的 `[6/7]` 策略检查（缺键/非法/窗口越界均警告）、上面的 `/metrics` 单客户端维度与龄期指标、以及 `platform-oauth-secrets` 组的三条告警。三者都缺失时不要假设“当前没有累积”。
+**发现与监控清单**：`keep` 是默认值且不阻断部署，所以“可发现”依赖三件事——`deploy.sh doctor` 的 `[6/8]` 策略检查（缺键/非法/窗口越界均警告）、上面的 `/metrics` 单客户端维度与龄期指标、以及 `platform-oauth-secrets` 组的三条告警。三者都缺失时不要假设“当前没有累积”。
 
 ### 1.3 HTTPS→HTTP 降级回滚（BIZ-RUNTIME-06）
 

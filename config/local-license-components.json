@@ -64,6 +64,17 @@
         "image": "settlement/backend:local"
       }
     },
+    "reimbursement": {
+      "directory": "reimbursement",
+      "services": {
+        "reimbursement-api": "reimbursement/backend:local",
+        "reimbursement-worker": "reimbursement/backend:local"
+      },
+      "migration": {
+        "service": "reimbursement-migrate",
+        "image": "reimbursement/backend:local"
+      }
+    },
     "data_analysis": {
       "directory": "data_analysis",
       "services": {

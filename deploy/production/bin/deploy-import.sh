@@ -109,6 +109,7 @@ import_package() (
     customer-portal) expected_images="uip-package/customer-portal-backend:$version" ;;
     contract) expected_images="uip-package/contract-backend:$version" ;;
     project) expected_images="uip-package/project-backend:$version" ;;
+    reimbursement) expected_images="uip-package/reimbursement-backend:$version" ;;
     settlement) expected_images="uip-package/settlement-backend:$version" ;;
     data-analysis) expected_images="uip-package/data-analysis-dashboard-api:$version,uip-package/data-analysis-aggregation-worker:$version,uip-package/data-analysis-alert-worker:$version,uip-package/data-analysis-production-migrate:$version" ;;
     *) die "镜像包组件未登记：$component" ;;
