@@ -10,6 +10,7 @@ import (
 
 var errRelatedContractDependency = errors.New("registered contract ingest dependency is unavailable")
 var errRelatedSettlementReferenceDependency = errors.New("registered settlement reference dependency is unavailable")
+var errRelatedReimbursementCostDependency = errors.New("registered reimbursement cost source dependency is unavailable")
 
 // p1ServicePurpose 标识必须核验登记身份的集成用途。
 // 参数：purpose 为机器凭据的用途。
@@ -22,12 +23,15 @@ func p1ServicePurpose(purpose string) bool {
 // 参数：ctx 控制请求，tenant、app和environment限定接收环境。
 // 返回值：已验证的同租户来源身份；缺依赖或身份漂移返回错误。
 func (handler *SubsystemOnboardingHandler) relatedServiceClients(ctx context.Context, tenant, app, environment string) ([]application.RelatedSubsystemServiceClient, error) {
-	if app != "settlement" && app != "project_management" {
+	if app != "settlement" && app != "project_management" && app != "reimbursement" {
 		return nil, nil
 	}
 	dependencyErr := errRelatedContractDependency
 	if app == "project_management" {
 		dependencyErr = errRelatedSettlementReferenceDependency
+	}
+	if app == "reimbursement" {
+		dependencyErr = errRelatedReimbursementCostDependency
 	}
 	if handler.serviceCredentials == nil {
 		return nil, fmt.Errorf("%w: credential manager unavailable", dependencyErr)
