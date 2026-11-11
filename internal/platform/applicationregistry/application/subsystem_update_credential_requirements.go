@@ -88,6 +88,7 @@ func SubsystemUpdateServiceCredentialRequirements(applicationCode string) []Subs
 			// 合同与项目读取凭据必须分离；任一密钥泄露时不能横向读取另一业务域。
 			{Purpose: ServiceCredentialContractDashboardRead, Suffix: "contract-dashboard", ClientName: "数据看板合同看板读取器", Scopes: []string{"dashboard.contract.read"}, Rotate: true},
 			{Purpose: ServiceCredentialProjectDashboardRead, Suffix: "project-dashboard", ClientName: "数据看板项目看板读取器", Scopes: []string{"dashboard.project.read"}, Rotate: true},
+			{Purpose: ServiceCredentialSettlementDashboardRead, Suffix: "settlement-dashboard", ClientName: "数据看板结算财务读取器", Scopes: []string{"dashboard.settlement.read"}, Rotate: true},
 			fileGateway,
 		}
 	case "project_management":

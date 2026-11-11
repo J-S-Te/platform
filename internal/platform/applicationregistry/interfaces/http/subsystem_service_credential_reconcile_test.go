@@ -291,6 +291,7 @@ func TestEnsureUpdateServiceCredentialsBackfillsSeparatedDashboardReaders(t *tes
 		"data_analysis-prod-audit-publisher":             {"audit.ingest"},
 		"data_analysis-prod-contract-dashboard":          {"dashboard.contract.read"},
 		"data_analysis-prod-project-dashboard":           {"dashboard.project.read"},
+		"data_analysis-prod-settlement-dashboard":        {"dashboard.settlement.read"},
 		"data_analysis-prod-file-gateway-writer":         {"platform:file:upload", "platform:file:bind", "platform:file:download"},
 	}
 	requireOnlyCreatedClients(t, manager.createdInputs, want)
@@ -299,6 +300,7 @@ func TestEnsureUpdateServiceCredentialsBackfillsSeparatedDashboardReaders(t *tes
 		application.ServiceCredentialAuditIngest:              "new-secret",
 		application.ServiceCredentialContractDashboardRead:    "new-secret",
 		application.ServiceCredentialProjectDashboardRead:     "new-secret",
+		application.ServiceCredentialSettlementDashboardRead:  "new-secret",
 		application.ServiceCredentialFileGatewayWrite:         "new-secret",
 	})
 }

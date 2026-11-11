@@ -57,6 +57,11 @@ runtime:
         # 人员离职交接入站（BIZ-XWIRE-04）：平台按批次租户自签短效 application JWT，
         # 结算侧只用平台 Ed25519 公钥验签；issuer/audience/client/应用/环境/scope 固定，
         # 租户只来自令牌。键名以 Settlement/internal/config 读取的 SETTLEMENT_HANDOVER_* 为准。
+        SETTLEMENT_DASHBOARD_MACHINE_AUDIENCE: basic-platform-application
+        SETTLEMENT_DASHBOARD_MACHINE_ISSUER: basic-platform
+        SETTLEMENT_DASHBOARD_MACHINE_PUBLIC_KEY_PATH: /app/data/keys/jwt-ed25519-public.pem
+        SETTLEMENT_DASHBOARD_MACHINE_CALLER_APPLICATION_CODE: data_analysis
+        SETTLEMENT_DASHBOARD_MACHINE_REQUIRED_SCOPE: dashboard.settlement.read
         SETTLEMENT_HANDOVER_ENABLED: "true"
         SETTLEMENT_HANDOVER_CLIENT_ID: platform-handover
         SETTLEMENT_HANDOVER_AUDIENCE: basic-platform-application
@@ -66,6 +71,11 @@ runtime:
         SETTLEMENT_HANDOVER_PUBLIC_KEY_PATH: /app/data/keys/jwt-ed25519-public.pem
         SETTLEMENT_HANDOVER_CALLER_ENVIRONMENT_CODE: prod
       bindings:
+        SETTLEMENT_DASHBOARD_MACHINE_ENABLED: settlement_dashboard_enabled
+        SETTLEMENT_DASHBOARD_MACHINE_UNAVAILABLE_REASON: settlement_dashboard_unavailable_reason
+        SETTLEMENT_DASHBOARD_MACHINE_CLIENT_ID: related_service.data_analysis.settlement_dashboard_read.client_id
+        SETTLEMENT_DASHBOARD_MACHINE_OAUTH_CLIENT_ID: related_service.data_analysis.settlement_dashboard_read.oauth_client_id
+        SETTLEMENT_DASHBOARD_MACHINE_CALLER_ENVIRONMENT_CODE: environment
         SETTLEMENT_PROJECT_REFERENCE_CLIENT_ID: service.settlement_project_reference_read.client_id
         SETTLEMENT_PROJECT_REFERENCE_CLIENT_SECRET: service.settlement_project_reference_read.client_secret
         PLATFORM_PERSONNEL_DIRECTORY_CLIENT_ID: service.owner_directory_read.client_id

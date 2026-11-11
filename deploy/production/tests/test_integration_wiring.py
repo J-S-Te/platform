@@ -93,6 +93,7 @@ UPDATE_CREDENTIAL_SUFFIXES = {
         "audit-publisher",
         "contract-dashboard",
         "project-dashboard",
+        "settlement-dashboard",
         FILE_GATEWAY_SUFFIX,
     ),
     "project_management": (
@@ -963,12 +964,13 @@ class ClientIdNamingLintTest(unittest.TestCase):
         )
 
     def test_lint_distinguishes_allowlisted_and_placeholder_values(self) -> None:
-        """守卫的守卫：规则本身要能区分规范名、allowlist 与占位。
-
-        防止后继改动把期望集合放空、或把占位前缀写宽后 lint 变成恒真。
+        """test_lint_distinguishes_allowlisted_and_placeholder_values 校验命名与占位边界。
+        参数：self 为隔离静态检查上下文，不读取实际运行配置。
+        返回值：无；规范财务客户端遗漏、错误命名或占位识别漂移时断言失败。
         """
         expected = expected_client_ids("prod")
         self.assertIn("data_analysis-prod-contract-dashboard", expected)
+        self.assertIn("data_analysis-prod-settlement-dashboard", expected)
         self.assertIn("contract_management-prod-analysis-import-report-status", expected)
         self.assertNotIn("data_analysis-prod-legacy-dashboard", expected)
         self.assertNotIn("platform-handover", expected, "allowlist 不应混进可推导集合")

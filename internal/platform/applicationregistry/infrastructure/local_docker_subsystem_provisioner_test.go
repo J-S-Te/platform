@@ -104,6 +104,9 @@ func TestUpdateSubsystemEnvironmentPreservesUnmanagedValuesAndProtectsSecrets(t 
 	}
 }
 
+// TestUpdateServiceCredentialRuntimeConfigurationWritesSeparatedDashboardCredentials 验证三个领域凭据独立交付。
+// 参数：t为隔离文件测试上下文。
+// 返回值：无，凭据或URL接线缺失时失败。
 func TestUpdateServiceCredentialRuntimeConfigurationWritesSeparatedDashboardCredentials(t *testing.T) {
 	directory := t.TempDir()
 	environmentPath := filepath.Join(directory, ".env.local")
@@ -117,6 +120,7 @@ func TestUpdateServiceCredentialRuntimeConfigurationWritesSeparatedDashboardCred
 		ServiceCredentials: []application.SubsystemServiceCredential{
 			{Purpose: application.ServiceCredentialContractDashboardRead, OAuthClient: application.OAuthClientView{ClientID: "data_analysis-dev-contract-dashboard"}, PlaintextSecret: "contract-secret"},
 			{Purpose: application.ServiceCredentialProjectDashboardRead, OAuthClient: application.OAuthClientView{ClientID: "data_analysis-dev-project-dashboard"}, PlaintextSecret: "project-secret"},
+			{Purpose: application.ServiceCredentialSettlementDashboardRead, OAuthClient: application.OAuthClientView{ID: "finance-id", TenantID: "tenant-1", ApplicationID: "app-1", EnvironmentID: "env-1", Status: "ACTIVE", ClientType: "service", TokenAuthMethod: "client_secret_basic", GrantTypes: []string{"client_credentials"}, Scopes: []string{"dashboard.settlement.read"}, ClientID: "data_analysis-dev-settlement-dashboard"}, PlaintextSecret: "settlement-secret"},
 		},
 	})
 	provisioner := &LocalDockerSubsystemProvisioner{}
@@ -137,6 +141,11 @@ func TestUpdateServiceCredentialRuntimeConfigurationWritesSeparatedDashboardCred
 		"PROJECT_MACHINE_CLIENT_ID=data_analysis-dev-project-dashboard",
 		"PROJECT_MACHINE_CLIENT_SECRET=project-secret",
 		"PROJECT_MACHINE_TOKEN_SCOPE=dashboard.project.read",
+		"SETTLEMENT_MACHINE_CLIENT_ID=data_analysis-dev-settlement-dashboard",
+		"SETTLEMENT_MACHINE_CLIENT_SECRET=settlement-secret",
+		"SETTLEMENT_MACHINE_TOKEN_SCOPE=dashboard.settlement.read",
+		"PROJECT_REPORT_URL=http://project-api:8082/internal/v1/dashboard/reports",
+		"SETTLEMENT_FINANCE_URL=http://settlement-api:8085/internal/v1/dashboard/finance",
 	} {
 		if !strings.Contains(string(content), expected) {
 			t.Fatalf("environment missing %q:\n%s", expected, content)

@@ -341,3 +341,53 @@ Keycloak 环境携带完整当前网关参数进行受控更新时，会按该�
 3. **Worker**：持久执行器已接入平台 Worker 启停（`cfg.SubsystemOnboarding.Enabled` 为真时随 Worker 进程运行，周期领取并推进阶段）；
 4. **就绪事实**：运行批准与商业授权为真实来源；镜像与认证观察期读取器未接线时，该项以**"未验证"**提示返回（既不当作就绪，也不当作缺失）；
 5. **未完成业务验收前**，任何"业务可用"结论都不成立：结果区只做分项展示，不显示"业务可用"字样。
+
+### 10.6 数据看板报告与结算财务读取
+
+数析读取项目报告复用 `project_dashboard_read`，请求
+`GET /internal/v1/dashboard/reports`。结算财务采用独立用途
+`settlement_dashboard_read`，客户端标签为
+`data_analysis-<环境>-settlement-dashboard`，唯一 scope 为
+`dashboard.settlement.read`，请求 `GET /internal/v1/dashboard/finance`。
+财务客户端的 Secret 只交付数析，不复用合同或项目凭据；普通受控更新会补发该用途。
+
+结算使用 `related_service.data_analysis.settlement_dashboard_read.client_id`
+校验 JWT 的 `sub`，使用同来源的 `oauth_client_id` 校验注册记录 ID。
+解析器核验同租户、应用、环境、ACTIVE 状态、service 类型、
+`client_secret_basic`、唯一 `client_credentials` 授权与唯一财务 scope。
+没有安装数析或尚未创建此用途时，结算收到
+`SETTLEMENT_DASHBOARD_MACHINE_ENABLED=false` 与
+`SETTLEMENT_DASHBOARD_MACHINE_UNAVAILABLE_REASON`，清空残留客户端 ID；
+已登记身份漂移或重复时更新失败。结算不会收到数析发送端 Secret。
+
+接入顺序：先通过既有受控数析更新创建并交付独立用途，再受控更新同环境结算以解析来源。
+结算未就绪期间财务端点返回不可用，数析应按来源失败保留旧快照；
+不能通过手工填写注册 ID 或伪造数据跳过接入。
+本地与生产共用身份校验和密钥继承规则；本地项目、结算只读 DSN 默认留空，
+只有明确选择兼容读取才配置。数析独立运行使用既有
+`DASHBOARD_INTEGRATION_SYNC_ENABLED=false`；标准财务使用
+`DASHBOARD_FINANCE_SOURCE=standard`。这两个运维选择不会被清单固定覆盖，
+显式配置的 `PROJECT_REPORT_URL`、`SETTLEMENT_FINANCE_URL`（包括空值）同样保留。
+
+现有环境的正常入口为 `POST /api/v1/subsystem-update`，JSON 请求仅需
+`{"application_code":"data_analysis","environment":"prod"}`；同环境结算改为
+`"application_code":"settlement"`。认证沿用已有管理员会话及写请求同源保护，
+不传 `issuer_alias` 即保持当前提供方。更新所需权限为
+`platform:application:update`、`platform:application-environment:update`、
+`platform:application-login-target:update` 和 `platform:oauth-client:disable`。
+
+平台、Agent、宿主必须先加载本次审核 descriptor；部署状态 READY 且清单摘要未变时，
+普通 UPDATE 会按既有规则跳过。需要强制补发用途，或仅因为来源创建而重新解析结算时，
+使用相同请求体调用 `POST /api/v1/subsystem-retry`，另需
+`platform:role-binding:update`。CLI 对应
+`bash scripts/subsystem.sh retry --application-code data_analysis --environment prod`，
+随后对 `settlement` 同样操作；使用正常认证参数，密码只走 stdin。
+受理后查 `GET /api/v1/subsystem-status?application_code=...&environment=prod`，
+确认后台完成、许可及运行批准正常，再进行下一应用。
+页面入口为平台应用管理中的「应用接入／接入向导」，选择系统和 prod 环境，
+读取真实预览判定并执行；已有失败环境的应用目录仍提供「重试」。
+需要强制重放且页面只判定普通 UPDATE 时，使用上面的受控 RETRY API/CLI。
+
+普通 CI 镜像切换不创建 OAuth 用途或 scope。推荐本轮发布顺序为：
+平台与接口提供方代码及审核 descriptor → 受控刷新数析发送端用途 →
+受控刷新结算接收端关联身份 → 数析新消费者镜像 → 机器链路复核。

@@ -772,32 +772,6 @@ func (provisioner *LocalDockerSubsystemProvisioner) updateServiceCredentialRunti
 			values["CRM_LINK_CLIENT_SECRET"] = credential.PlaintextSecret
 			values["CRM_LINK_SCOPE"] = "opportunity.signed.write"
 		}
-	case "data_analysis":
-		contractCredential, ok := input.ServiceCredential(application.ServiceCredentialContractDashboardRead)
-		if !ok {
-			return provisioningError("data analysis contract dashboard credential is unavailable")
-		}
-		projectCredential, ok := input.ServiceCredential(application.ServiceCredentialProjectDashboardRead)
-		if !ok {
-			return provisioningError("data analysis project dashboard credential is unavailable")
-		}
-		expectedContractClientID := input.ApplicationCode + "-" + input.Environment + "-contract-dashboard"
-		if contractCredential.OAuthClient.ClientID != expectedContractClientID {
-			return provisioningError("data analysis contract dashboard credential does not match the target environment")
-		}
-		expectedProjectClientID := input.ApplicationCode + "-" + input.Environment + "-project-dashboard"
-		if projectCredential.OAuthClient.ClientID != expectedProjectClientID {
-			return provisioningError("data analysis project dashboard credential does not match the target environment")
-		}
-		values["MACHINE_TOKEN_URL"] = "http://platform-api:8080/oauth2/token"
-		values["MACHINE_TOKEN_ISSUER"] = "basic-platform"
-		values["MACHINE_TOKEN_AUDIENCE"] = "basic-platform-application"
-		values["CONTRACT_MACHINE_CLIENT_ID"] = contractCredential.OAuthClient.ClientID
-		values["CONTRACT_MACHINE_CLIENT_SECRET"] = contractCredential.PlaintextSecret
-		values["CONTRACT_MACHINE_TOKEN_SCOPE"] = "dashboard.contract.read"
-		values["PROJECT_MACHINE_CLIENT_ID"] = projectCredential.OAuthClient.ClientID
-		values["PROJECT_MACHINE_CLIENT_SECRET"] = projectCredential.PlaintextSecret
-		values["PROJECT_MACHINE_TOKEN_SCOPE"] = "dashboard.project.read"
 	}
 	if err := provisioner.p1LocalRuntimeValues(input, environmentPath, values, false); err != nil {
 		return err

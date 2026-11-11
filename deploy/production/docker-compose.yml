@@ -2248,7 +2248,7 @@ services:
       PROJECT_READ_DSN: ${PROJECT_READ_DSN:-}
       SETTLEMENT_READ_DSN: ${SETTLEMENT_READ_DSN:-}
       DASHBOARD_TIMEZONE: ${DASHBOARD_TIMEZONE:-Asia/Shanghai}
-      # 机器令牌端点、两个最小权限客户端及接口 URL 均由受控 runtime 文件下发，
+      # 机器令牌端点、三个最小权限客户端及接口 URL 均由受控 runtime 文件下发，
       # Compose 不得用空默认值覆盖已经完成接入的环境配置。
     depends_on:
       data-analysis-mysql:
