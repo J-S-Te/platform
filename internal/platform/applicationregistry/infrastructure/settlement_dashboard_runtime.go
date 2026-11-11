@@ -150,3 +150,47 @@ func preserveDataAnalysisDashboardSources(code string, current, values map[strin
 		}
 	}
 }
+
+// settlementDashboardRuntimeEmptyBindings 限定结算财务入口在明确启停状态下允许的空绑定。
+// 参数：code为接收应用，bindings为审核清单映射，values为待校验的运行配置。
+// 返回值：可为空的固定键集合；用途映射、启停状态或禁用原因非法时返回错误。
+func settlementDashboardRuntimeEmptyBindings(code string, bindings, values map[string]string) (map[string]bool, error) {
+	allowed := map[string]bool{}
+	if code != "settlement" {
+		return allowed, nil
+	}
+	const prefix = "SETTLEMENT_DASHBOARD_MACHINE_"
+	expected := map[string]string{
+		prefix + "ENABLED":            "settlement_dashboard_enabled",
+		prefix + "UNAVAILABLE_REASON": "settlement_dashboard_unavailable_reason",
+		prefix + "CLIENT_ID":          settlementDashboardRelatedPrefix + "client_id",
+		prefix + "OAUTH_CLIENT_ID":    settlementDashboardRelatedPrefix + "oauth_client_id",
+	}
+	declared := false
+	for key := range expected {
+		if _, exists := bindings[key]; exists {
+			declared = true
+		}
+	}
+	if !declared {
+		return allowed, nil
+	}
+	for key, source := range expected {
+		if bindings[key] != source {
+			return nil, provisioningError("settlement dashboard runtime binding mismatch")
+		}
+	}
+	switch values[prefix+"ENABLED"] {
+	case "true":
+		allowed[prefix+"UNAVAILABLE_REASON"] = true
+	case "false":
+		reason := values[prefix+"UNAVAILABLE_REASON"]
+		if productionEnvironmentValueMissing(reason) || !validEnvironmentValue(reason) {
+			return nil, provisioningError("disabled settlement dashboard requires a valid unavailable reason")
+		}
+		allowed[prefix+"CLIENT_ID"], allowed[prefix+"OAUTH_CLIENT_ID"] = true, true
+	default:
+		return nil, provisioningError("settlement dashboard enabled state is invalid")
+	}
+	return allowed, nil
+}

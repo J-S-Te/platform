@@ -528,9 +528,9 @@ func (target *productionComposeTarget) checkRuntimeProjection(ctx context.Contex
 	return nil
 }
 
-// validateRuntimeIntegrationConfiguration 在 Update 写入安全配置后校验全部清单绑定。
-// 常规更新会保留浏览器 OAuth 密钥，但绝不能让 Compose 使用缺失或接入占位值启动；否则
-// 配置问题只会在稍后的健康检查中表现为无法定位的 401/403。
+// validateRuntimeIntegrationConfiguration 校验受控更新后的用途绑定及必要凭据。
+// 参数：无，读取当前审核清单对应的运行文件。
+// 返回值：配置完整时成功；非法值、占位、缺失或不合法的用途条件返回错误。
 func (target *productionComposeTarget) validateRuntimeIntegrationConfiguration() error {
 	for _, runtimeFile := range target.selectedRuntimeFiles() {
 		path := filepath.Join(target.config.DeployRoot, filepath.FromSlash(runtimeFile.Path))
@@ -539,7 +539,15 @@ func (target *productionComposeTarget) validateRuntimeIntegrationConfiguration()
 			return provisioningError("read production subsystem runtime configuration")
 		}
 		values := parseEnvironmentValues(string(content))
+		emptyBindings, err := settlementDashboardRuntimeEmptyBindings(
+			target.config.Profile.Manifest.Application.Code, runtimeFile.Bindings, values)
+		if err != nil {
+			return err
+		}
 		for key := range runtimeFile.Bindings {
+			if emptyBindings[key] && values[key] == "" {
+				continue
+			}
 			if productionEnvironmentValueMissing(values[key]) || !validEnvironmentValue(values[key]) {
 				return provisioningError("production subsystem runtime configuration is incomplete: " + key + " is missing or still an onboarding placeholder; run the controlled adoption/retry workflow")
 			}
