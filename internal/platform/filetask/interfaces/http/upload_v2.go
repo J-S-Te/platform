@@ -58,11 +58,12 @@ func NewUploadV2Handler(db *gorm.DB, files uploadV2FileService, newID func(time.
 }
 
 type uploadPolicy struct {
-	Namespace string
-	Purpose   string
-	Media     map[string]struct{}
-	MaxBytes  uint64
-	Temporary bool
+	Namespace      string
+	Purpose        string
+	Media          map[string]struct{}
+	MaxBytes       uint64
+	Temporary      bool
+	Classification string
 }
 
 var uploadPolicies = map[string]uploadPolicy{
@@ -88,6 +89,11 @@ var uploadPolicies = map[string]uploadPolicy{
 	"project.detection-category.import": policy("project", "detection-category-import", true, "text/csv"),
 	"settlement.receipt.document":       policy("settlement", "receipt-document", false, "application/pdf", "image/png", "image/jpeg"),
 	"settlement.invoice.document":       policy("settlement", "invoice-document", false, "application/pdf", "image/png", "image/jpeg", "application/xml", "text/xml", "application/ofd"),
+	"settlement.recognition.evidence": {
+		Namespace: "settlement", Purpose: "recognition-evidence", MaxBytes: 10 << 20,
+		Classification: "CONFIDENTIAL",
+		Media:          map[string]struct{}{"application/pdf": {}, "image/png": {}, "image/jpeg": {}},
+	},
 	// 结算报表导出（v1 通道沿用）必须显式声明用途：文本 CSV 才允许，上限 20MB、非临时文件。
 	// 该用途把原先"空 purpose 裸上传"的报表导出收敛到策略表内，v1 与 v2 共用同一事实源。
 	"settlement.report.export": policyWithMax("settlement", "report-export", false, 20<<20, "text/csv"),
@@ -254,6 +260,9 @@ func (h *UploadV2Handler) CreateSession(w http.ResponseWriter, r *http.Request) 
 	classification := strings.ToUpper(strings.TrimSpace(input.Classification))
 	if classification == "" {
 		classification = "INTERNAL"
+	}
+	if selected.Classification != "" {
+		classification = selected.Classification
 	}
 	mode := "PROXY"
 	if input.SizeBytes > v2ProxyThreshold {

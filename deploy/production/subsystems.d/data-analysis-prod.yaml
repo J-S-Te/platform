@@ -68,6 +68,7 @@ runtime:
         SETTLEMENT_MACHINE_TOKEN_SCOPE: dashboard.settlement.read
         SETTLEMENT_FINANCE_URL: http://settlement-api:8085/internal/v1/dashboard/finance
         PROJECT_REPORT_URL: http://project-api:8082/internal/v1/dashboard/reports
+        METRIC_FACTS_SYNC_ENABLED: "true"
         CONTRACT_INTERNAL_URL: http://contract-api:8081/internal/v1/dashboard
         PROJECT_INTERNAL_URL: http://project-api:8082/internal/v1/dashboard
         PROJECT_PROJECTION_URL: http://project-api:8082/internal/v1/dashboard/projects/snapshot

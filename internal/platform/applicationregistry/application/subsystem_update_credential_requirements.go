@@ -111,6 +111,7 @@ func SubsystemUpdateServiceCredentialRequirements(applicationCode string) []Subs
 			{Purpose: ServiceCredentialAuditIngest, Suffix: "audit-publisher", ClientName: "结算与开票管理系统 Audit Publisher", Scopes: []string{"audit.ingest"}, Rotate: true},
 			{Purpose: ServiceCredentialNotificationIngest, Suffix: "notification-publisher", ClientName: "结算与开票管理系统 Notification Publisher", Scopes: []string{"notification.ingest"}, Rotate: true},
 			{Purpose: ServiceCredentialOwnerDirectoryRead, Suffix: "owner-directory", ClientName: "结算与开票管理系统 Owner Directory Reader", Scopes: []string{"owner_directory.read"}, Rotate: true},
+			{Purpose: ServiceCredentialSettlementReimbursementCostRead, Suffix: "reimbursement-cost", ClientName: "Settlement Reimbursement Cost Reader", Scopes: []string{"reimbursement.cost_candidate.read"}, Rotate: true},
 			{Purpose: ServiceCredentialSettlementProjectReferenceRead, Suffix: "project-reference", ClientName: "结算项目引用只读", Scopes: []string{"settlement.project_reference.read"}, Rotate: true},
 			// 结算→CRM 信用事实同步凭据进入运行文件（settlement-prod.yaml 的
 			// service.crm_credit_payment_ingest.*）。受控更新必须创建/轮换并重新下发，

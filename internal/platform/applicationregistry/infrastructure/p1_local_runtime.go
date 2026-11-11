@@ -85,6 +85,9 @@ func (provisioner *LocalDockerSubsystemProvisioner) p1LocalRuntimeValues(input a
 		if strings.EqualFold(strings.TrimSpace(current["SETTLEMENT_DEVELOPMENT_AUTH"]), "true") {
 			return nil
 		}
+		if err := settlementReimbursementCostRuntimeValues(input, current, values); err != nil {
+			return err
+		}
 		if err := settlementContractRuntimeValues(input, current, values); err != nil {
 			return err
 		}
@@ -179,6 +182,7 @@ func (provisioner *LocalDockerSubsystemProvisioner) p1LocalRuntimeValues(input a
 var p1ServiceCredentialScopes = map[string]string{
 	application.ServiceCredentialReimbursementProjectReferenceRead:  "reimbursement.project_reference.read",
 	application.ServiceCredentialProjectReimbursementCostWrite:      "project.reimbursement_cost.write",
+	application.ServiceCredentialSettlementReimbursementCostRead:    "reimbursement.cost_candidate.read",
 	application.ServiceCredentialSettlementDashboardRead:            "dashboard.settlement.read",
 	application.ServiceCredentialContractImportReportRead:           "contract.import.report.read",
 	application.ServiceCredentialAnalysisContractImportReportStatus: "analysis.contract-import.report-status",
@@ -197,10 +201,20 @@ var p1ServiceCredentialScopes = map[string]string{
 // 参数：input 为目标登记环境，purpose 为用途，client 为持久身份元数据。
 // 返回值：匹配时为空，否则为拒绝原因。
 func validateP1ServiceCredential(input application.SubsystemProvisioningInput, purpose string, client application.OAuthClientView) error {
+	if purpose == application.ServiceCredentialSettlementReimbursementCostRead {
+		if err := validateReimbursementCostIsolation(input, client); err != nil {
+			return err
+		}
+	}
 	if purpose == application.ServiceCredentialSettlementDashboardRead &&
 		(input.ApplicationCode != "data_analysis" ||
 			client.ClientID != "data_analysis-"+input.Environment+"-settlement-dashboard") {
 		return provisioningError("settlement dashboard credential caller mismatch")
+	}
+	if purpose == application.ServiceCredentialSettlementReimbursementCostRead &&
+		(input.ApplicationCode != "settlement" ||
+			client.ClientID != "settlement-"+input.Environment+"-reimbursement-cost") {
+		return provisioningError("reimbursement cost credential caller mismatch")
 	}
 	if input.TenantID == "" || input.ApplicationID == "" || input.EnvironmentID == "" || client.ID == "" {
 		return provisioningError("new business credential registered identity is unavailable")
@@ -209,7 +223,7 @@ func validateP1ServiceCredential(input application.SubsystemProvisioningInput, p
 		return provisioningError("new business service credential target mismatch")
 	}
 	expectedScope := p1ServiceCredentialScopes[purpose]
-	scopeValid := len(client.Scopes) == 1 && client.Scopes[0] == expectedScope
+	scopeValid := expectedScope != "" && len(client.Scopes) == 1 && client.Scopes[0] == expectedScope
 	if purpose == application.ServiceCredentialFileGatewayWrite {
 		scopeValid = len(client.Scopes) == 3
 		for _, required := range []string{"platform:file:upload", "platform:file:bind", "platform:file:download"} {

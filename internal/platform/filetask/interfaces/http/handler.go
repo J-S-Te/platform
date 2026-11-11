@@ -172,6 +172,9 @@ func (handler *Handler) Upload(writer http.ResponseWriter, request *http.Request
 	// 合同 purpose 生效（BIZ-XAPI-11）：策略表是 v1/v2 共用的唯一事实源，未登记
 	// purpose 在上一行已经失败关闭。
 	namespace, purpose := resolved.Namespace, resolved.Purpose
+	if resolved.Classification != "" {
+		classification = resolved.Classification
+	}
 	policyVersion, retentionClass := v2PolicyVersion, "LONG_TERM"
 	var retentionUntil *time.Time
 	if resolved.Temporary {

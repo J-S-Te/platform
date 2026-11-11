@@ -46,6 +46,9 @@ func settlementRoleRuntimeFixture(t *testing.T,
 		ClientSecret:           "browser-only",
 		RedirectURI:            "https://identity.example/" + app + "/auth/callback"})
 	input.ServiceCredentials = nil
+	if app == "settlement" {
+		input.ServiceCredentials = append(input.ServiceCredentials, costSenderFixtureCredential(input))
+	}
 	for purpose, scope := range map[string]string{"settlement_project_reference_read": "settlement.project_reference.read",
 		"owner_directory_read":   "owner_directory.read",
 		"notification_ingest":    "notification.ingest",

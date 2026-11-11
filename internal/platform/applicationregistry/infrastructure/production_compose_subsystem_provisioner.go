@@ -544,6 +544,14 @@ func (target *productionComposeTarget) validateRuntimeIntegrationConfiguration()
 		if err != nil {
 			return err
 		}
+		costEmpty, err := reimbursementCostRuntimeEmptyBindings(
+			target.config.Profile.Manifest.Application.Code, runtimeFile.Bindings, values)
+		if err != nil {
+			return err
+		}
+		for key := range costEmpty {
+			emptyBindings[key] = true
+		}
 		for key := range runtimeFile.Bindings {
 			if emptyBindings[key] && values[key] == "" {
 				continue
@@ -1131,7 +1139,7 @@ func (target *productionComposeTarget) writeRuntimeFixedValues(input application
 					return resolveErr
 				}
 				values[key] = value
-			case "settlement_dashboard_enabled", "settlement_dashboard_unavailable_reason", "reimbursement_integration_enabled", "tenant_id", "application_id", "application_code", "environment", "authorization_context_url":
+			case "reimbursement_cost_enabled", "settlement_dashboard_enabled", "settlement_dashboard_unavailable_reason", "reimbursement_integration_enabled", "tenant_id", "application_id", "application_code", "environment", "authorization_context_url":
 				value, resolveErr := resolveProductionBinding(input, source)
 				if resolveErr != nil {
 					return resolveErr
@@ -1224,6 +1232,7 @@ func (target *productionComposeTarget) writeRuntimeFixedValues(input application
 		}
 		// 运维已明确写入的联动开关不能被受控更新的清单默认值覆盖。
 		preserveDataAnalysisDashboardSources(target.config.Profile.Manifest.Application.Code, currentValues, values)
+		preserveReimbursementCostSelection(target.config.Profile.Manifest.Application.Code, currentValues, values)
 		preserveExplicitBusinessModeValues(target.config.Profile.Manifest.Application.Code, currentValues, values)
 		effective, err := readEnvironmentValues(path)
 		if err != nil {
@@ -1299,6 +1308,7 @@ func (target *productionComposeTarget) writeRuntimeConfiguration(input applicati
 			return err
 		}
 		preserveDataAnalysisDashboardSources(target.config.Profile.Manifest.Application.Code, currentRuntimeLinkageModes(path), values)
+		preserveReimbursementCostSelection(target.config.Profile.Manifest.Application.Code, currentRuntimeLinkageModes(path), values)
 		preserveExplicitBusinessModeValues(target.config.Profile.Manifest.Application.Code, currentRuntimeLinkageModes(path), values)
 		effective, err := readEnvironmentValues(path)
 		if err != nil {
@@ -1317,6 +1327,9 @@ func (target *productionComposeTarget) writeRuntimeConfiguration(input applicati
 // 参数：input 为目标环境及已登记凭据，source 为清单绑定来源。
 // 返回值：绑定值；身份不匹配或来源不受支持时返回错误。
 func resolveProductionBinding(input application.SubsystemProvisioningInput, source string) (string, error) {
+	if source == "reimbursement_cost_enabled" || strings.HasPrefix(source, reimbursementCostRelatedPrefix) {
+		return resolveReimbursementCostBinding(input, source)
+	}
 	if source == "settlement_dashboard_enabled" || source == "settlement_dashboard_unavailable_reason" || strings.HasPrefix(source, settlementDashboardRelatedPrefix) {
 		return resolveSettlementDashboardBinding(input, source)
 	}

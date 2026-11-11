@@ -501,6 +501,13 @@ func validProductionGeneratedEnvironmentKey(value string) bool {
 // 参数：source 为绑定来源。
 // 返回值：来源和字段是否受支持。
 func validProductionBindingSource(source string) bool {
+	if source == "reimbursement_cost_enabled" || strings.HasPrefix(source, reimbursementCostRelatedPrefix) {
+		if source == "reimbursement_cost_enabled" {
+			return true
+		}
+		suffix := strings.TrimPrefix(source, reimbursementCostRelatedPrefix)
+		return suffix == "client_id" || suffix == "oauth_client_id" || suffix == "application_id" || suffix == "environment_id"
+	}
 	if source == "settlement_dashboard_enabled" || source == "settlement_dashboard_unavailable_reason" || strings.HasPrefix(source, settlementDashboardRelatedPrefix) {
 		return source == "settlement_dashboard_enabled" || source == "settlement_dashboard_unavailable_reason" || source == settlementDashboardRelatedPrefix+"client_id" || source == settlementDashboardRelatedPrefix+"oauth_client_id"
 	}
@@ -529,6 +536,9 @@ func validProductionBindingSource(source string) bool {
 // 参数：app 为接收应用清单，source 为待解析来源。
 // 返回值：是否允许该应用消费该用途或关联身份。
 func productionServiceBindingAllowed(app *productionSubsystemApplicationManifest, source string) bool {
+	if source == "reimbursement_cost_enabled" || strings.HasPrefix(source, reimbursementCostRelatedPrefix) {
+		return app.Code == "reimbursement" && validProductionBindingSource(source)
+	}
 	if source == "settlement_dashboard_enabled" || source == "settlement_dashboard_unavailable_reason" || strings.HasPrefix(source, settlementDashboardRelatedPrefix) {
 		return app.Code == "settlement" && validProductionBindingSource(source)
 	}
@@ -596,6 +606,8 @@ func hardcodedProductionServiceBindingPurposes(applicationCode string) []string 
 			application.ServiceCredentialSettlementContractIngest,
 			application.ServiceCredentialOwnerDirectoryRead,
 		}
+	case "settlement", "settlement_and_invoicing":
+		return []string{application.ServiceCredentialSettlementReimbursementCostRead, application.ServiceCredentialSettlementProjectReferenceRead, application.ServiceCredentialCRMCreditPaymentIngest, application.ServiceCredentialOwnerDirectoryRead, application.ServiceCredentialNotificationIngest, application.ServiceCredentialFileGatewayWrite}
 	case "data_analysis":
 		return []string{application.ServiceCredentialContractDashboardRead, application.ServiceCredentialProjectDashboardRead, application.ServiceCredentialContractImportReportRead, application.ServiceCredentialSettlementDashboardRead}
 	case "project_management":

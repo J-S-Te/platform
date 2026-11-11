@@ -258,18 +258,20 @@ func TestEnsureUpdateServiceCredentialsRepairsSettlementRuntimeCredentials(t *te
 	}
 	requireOnlyCreatedClients(t, manager.createdInputs, map[string][]string{
 		"settlement-prod-audit-publisher":        {"audit.ingest"},
+		"settlement-prod-reimbursement-cost":     {"reimbursement.cost_candidate.read"},
 		"settlement-prod-notification-publisher": {"notification.ingest"},
 		"settlement-prod-owner-directory":        {"owner_directory.read"},
 		"settlement-prod-project-reference":      {"settlement.project_reference.read"},
 		"settlement-prod-crm-credit-ingest":      {"customer.credit.payment.ingest"},
 	})
 	requireOnlyCredentialPurposes(t, credentials, map[string]string{
-		application.ServiceCredentialAuditIngest:                    "new-secret",
-		application.ServiceCredentialSettlementProjectReferenceRead: "new-secret",
-		application.ServiceCredentialNotificationIngest:             "new-secret",
-		application.ServiceCredentialOwnerDirectoryRead:             "new-secret",
-		application.ServiceCredentialCRMCreditPaymentIngest:         "new-secret",
-		application.ServiceCredentialFileGatewayWrite:               "retry-secret",
+		application.ServiceCredentialAuditIngest:                     "new-secret",
+		application.ServiceCredentialSettlementReimbursementCostRead: "new-secret",
+		application.ServiceCredentialSettlementProjectReferenceRead:  "new-secret",
+		application.ServiceCredentialNotificationIngest:              "new-secret",
+		application.ServiceCredentialOwnerDirectoryRead:              "new-secret",
+		application.ServiceCredentialCRMCreditPaymentIngest:          "new-secret",
+		application.ServiceCredentialFileGatewayWrite:                "retry-secret",
 	})
 }
 
