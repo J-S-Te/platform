@@ -49,7 +49,17 @@ func (resolver *RelatedServiceClientsResolver) Resolve(ctx context.Context, tena
 // 返回值：已登记的权威来源；仅可选来源未登记/客户端未创建返回空，其他失败返回错误。
 func (resolver *RelatedServiceClientsResolver) ResolveWithPolicy(ctx context.Context, tenantID, applicationCode, environment string, policy SubsystemRelatedServicePolicy) ([]RelatedSubsystemServiceClient, error) {
 	result, err := resolver.resolveLegacySources(ctx, tenantID, applicationCode, environment, policy)
-	if err != nil || applicationCode != "project_management" {
+	if err != nil {
+		return nil, err
+	}
+	if applicationCode == "settlement" {
+		dashboard, err := resolver.resolveSettlementDashboardSource(ctx, tenantID, environment)
+		if err != nil {
+			return nil, err
+		}
+		return append(result, dashboard...), nil
+	}
+	if applicationCode != "project_management" {
 		return result, err
 	}
 	reimbursement, err := resolver.resolveReimbursementSources(ctx, tenantID, environment)

@@ -1123,7 +1123,7 @@ func (target *productionComposeTarget) writeRuntimeFixedValues(input application
 					return resolveErr
 				}
 				values[key] = value
-			case "reimbursement_integration_enabled", "tenant_id", "application_id", "application_code", "environment", "authorization_context_url":
+			case "settlement_dashboard_enabled", "settlement_dashboard_unavailable_reason", "reimbursement_integration_enabled", "tenant_id", "application_id", "application_code", "environment", "authorization_context_url":
 				value, resolveErr := resolveProductionBinding(input, source)
 				if resolveErr != nil {
 					return resolveErr
@@ -1215,6 +1215,7 @@ func (target *productionComposeTarget) writeRuntimeFixedValues(input application
 			return err
 		}
 		// 运维已明确写入的联动开关不能被受控更新的清单默认值覆盖。
+		preserveDataAnalysisDashboardSources(target.config.Profile.Manifest.Application.Code, currentValues, values)
 		preserveExplicitBusinessModeValues(target.config.Profile.Manifest.Application.Code, currentValues, values)
 		effective, err := readEnvironmentValues(path)
 		if err != nil {
@@ -1289,6 +1290,7 @@ func (target *productionComposeTarget) writeRuntimeConfiguration(input applicati
 		if err := inheritProductionRuntimeValues(target.config.DeployRoot, runtimeFile, staged, values); err != nil {
 			return err
 		}
+		preserveDataAnalysisDashboardSources(target.config.Profile.Manifest.Application.Code, currentRuntimeLinkageModes(path), values)
 		preserveExplicitBusinessModeValues(target.config.Profile.Manifest.Application.Code, currentRuntimeLinkageModes(path), values)
 		effective, err := readEnvironmentValues(path)
 		if err != nil {
@@ -1307,6 +1309,9 @@ func (target *productionComposeTarget) writeRuntimeConfiguration(input applicati
 // 参数：input 为目标环境及已登记凭据，source 为清单绑定来源。
 // 返回值：绑定值；身份不匹配或来源不受支持时返回错误。
 func resolveProductionBinding(input application.SubsystemProvisioningInput, source string) (string, error) {
+	if source == "settlement_dashboard_enabled" || source == "settlement_dashboard_unavailable_reason" || strings.HasPrefix(source, settlementDashboardRelatedPrefix) {
+		return resolveSettlementDashboardBinding(input, source)
+	}
 	if source == "reimbursement_integration_enabled" || strings.HasPrefix(source, reimbursementRelatedPrefix) {
 		return resolveReimbursementReceiverBinding(input, source)
 	}

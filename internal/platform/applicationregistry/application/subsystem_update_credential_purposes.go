@@ -7,6 +7,7 @@ import "strings"
 var SubsystemUpdateP1Purposes = []string{
 	ServiceCredentialReimbursementProjectReferenceRead, ServiceCredentialProjectReimbursementCostWrite,
 	ServiceCredentialContractImportReportRead,
+	ServiceCredentialSettlementDashboardRead,
 	ServiceCredentialAnalysisContractImportReportStatus,
 	ServiceCredentialSettlementProjectReferenceRead,
 	ServiceCredentialSettlementContractIngest,

@@ -33,7 +33,9 @@ func (provisioner *LocalDockerSubsystemProvisioner) p1LocalRuntimeValues(input a
 	if input.ApplicationCode == "reimbursement" {
 		return reimbursementLocalRuntimeValues(input, path, values, fresh)
 	}
-	if input.ApplicationCode != "contract_management" && input.ApplicationCode != "customer_portal" && input.ApplicationCode != "settlement" && input.ApplicationCode != "project_management" {
+	if input.ApplicationCode != "contract_management" && input.ApplicationCode != "customer_portal" &&
+		input.ApplicationCode != "settlement" && input.ApplicationCode != "project_management" &&
+		input.ApplicationCode != "data_analysis" {
 		return nil
 	}
 	current := map[string]string{}
@@ -49,6 +51,9 @@ func (provisioner *LocalDockerSubsystemProvisioner) p1LocalRuntimeValues(input a
 		}
 	} else if !os.IsNotExist(err) {
 		return provisioningError("read business runtime configuration")
+	}
+	if input.ApplicationCode == "data_analysis" {
+		return dataAnalysisDashboardRuntimeValues(input, current, values)
 	}
 	if input.ApplicationCode == "project_management" {
 		if err := projectSettlementReferenceRuntimeValues(input, values); err != nil {
@@ -67,6 +72,9 @@ func (provisioner *LocalDockerSubsystemProvisioner) p1LocalRuntimeValues(input a
 		return nil
 	}
 	if input.ApplicationCode == "settlement" {
+		if err := settlementDashboardRuntimeValues(input, values); err != nil {
+			return err
+		}
 		if err := settlementRoleRuntimeValues(input, current, values); err != nil {
 			return err
 		}
@@ -171,6 +179,7 @@ func (provisioner *LocalDockerSubsystemProvisioner) p1LocalRuntimeValues(input a
 var p1ServiceCredentialScopes = map[string]string{
 	application.ServiceCredentialReimbursementProjectReferenceRead:  "reimbursement.project_reference.read",
 	application.ServiceCredentialProjectReimbursementCostWrite:      "project.reimbursement_cost.write",
+	application.ServiceCredentialSettlementDashboardRead:            "dashboard.settlement.read",
 	application.ServiceCredentialContractImportReportRead:           "contract.import.report.read",
 	application.ServiceCredentialAnalysisContractImportReportStatus: "analysis.contract-import.report-status",
 	application.ServiceCredentialSettlementProjectReferenceRead:     "settlement.project_reference.read",
@@ -188,6 +197,11 @@ var p1ServiceCredentialScopes = map[string]string{
 // 参数：input 为目标登记环境，purpose 为用途，client 为持久身份元数据。
 // 返回值：匹配时为空，否则为拒绝原因。
 func validateP1ServiceCredential(input application.SubsystemProvisioningInput, purpose string, client application.OAuthClientView) error {
+	if purpose == application.ServiceCredentialSettlementDashboardRead &&
+		(input.ApplicationCode != "data_analysis" ||
+			client.ClientID != "data_analysis-"+input.Environment+"-settlement-dashboard") {
+		return provisioningError("settlement dashboard credential caller mismatch")
+	}
 	if input.TenantID == "" || input.ApplicationID == "" || input.EnvironmentID == "" || client.ID == "" {
 		return provisioningError("new business credential registered identity is unavailable")
 	}

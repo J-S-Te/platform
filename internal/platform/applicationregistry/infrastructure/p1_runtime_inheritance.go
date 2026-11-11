@@ -22,7 +22,7 @@ func usableProductionCredential(value string) bool {
 // p1StrictServicePurposes 是需要严格登记校验与密钥补发保护的机器身份用途。
 // 每个用途都必须在 p1ServiceCredentialScopes 声明唯一允许的 scope；遗漏会让
 // 对应清单绑定在校验阶段必然失败（contract_management 的 crm_contract_link_write 曾因此阻断接入）。
-var p1StrictServicePurposes = []string{"reimbursement_project_reference_read", "project_reimbursement_cost_write", "contract_import_report_read", "analysis_contract_import_report_status", "settlement_project_reference_read", "settlement_contract_ingest", "crm_contract_link_write", "portal_report_file_read", "portal_report_download_identity_read"}
+var p1StrictServicePurposes = []string{"reimbursement_project_reference_read", "project_reimbursement_cost_write", "contract_import_report_read", "settlement_dashboard_read", "analysis_contract_import_report_status", "settlement_project_reference_read", "settlement_contract_ingest", "crm_contract_link_write", "portal_report_file_read", "portal_report_download_identity_read"}
 
 // isP1ProductionServiceBinding 识别需要严格登记校验和密钥补发保护的绑定。
 // 参数：source 为清单的服务绑定来源。

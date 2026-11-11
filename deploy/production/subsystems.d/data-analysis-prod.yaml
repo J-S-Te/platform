@@ -5,7 +5,7 @@ default: false
 application:
   code: data_analysis
   initial_admin_roles: [dashboard_admin]
-  allowed_service_bindings: [contract_dashboard_read, project_dashboard_read, contract_import_report_read]
+  allowed_service_bindings: [contract_dashboard_read, project_dashboard_read, contract_import_report_read, settlement_dashboard_read]
   name: 数据看板与统计分析系统
   description: 经营总览、合同项目分析、预警与指标看板
   environment: prod
@@ -65,6 +65,9 @@ runtime:
         MACHINE_TOKEN_AUDIENCE: basic-platform-application
         CONTRACT_MACHINE_TOKEN_SCOPE: dashboard.contract.read
         PROJECT_MACHINE_TOKEN_SCOPE: dashboard.project.read
+        SETTLEMENT_MACHINE_TOKEN_SCOPE: dashboard.settlement.read
+        SETTLEMENT_FINANCE_URL: http://settlement-api:8085/internal/v1/dashboard/finance
+        PROJECT_REPORT_URL: http://project-api:8082/internal/v1/dashboard/reports
         CONTRACT_INTERNAL_URL: http://contract-api:8081/internal/v1/dashboard
         PROJECT_INTERNAL_URL: http://project-api:8082/internal/v1/dashboard
         PROJECT_PROJECTION_URL: http://project-api:8082/internal/v1/dashboard/projects/snapshot
@@ -94,6 +97,8 @@ runtime:
         CONTRACT_MACHINE_CLIENT_SECRET: service.contract_dashboard_read.client_secret
         PROJECT_MACHINE_CLIENT_ID: service.project_dashboard_read.client_id
         PROJECT_MACHINE_CLIENT_SECRET: service.project_dashboard_read.client_secret
+        SETTLEMENT_MACHINE_CLIENT_ID: service.settlement_dashboard_read.client_id
+        SETTLEMENT_MACHINE_CLIENT_SECRET: service.settlement_dashboard_read.client_secret
 compose:
   dependency_services: [data-analysis-mysql]
   initialization_services: [data-analysis-metabase-init]

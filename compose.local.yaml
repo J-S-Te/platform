@@ -1023,9 +1023,9 @@ services:
       PROJECT_INTERNAL_URL: http://project-api:8082/internal/v1/dashboard
       PROJECT_PROJECTION_URL: http://project-api:8082/internal/v1/dashboard/projects/snapshot
       PROJECT_PROJECTION_HTTP_TIMEOUT: ${PROJECT_PROJECTION_HTTP_TIMEOUT:-35s}
-      # 可选只读 DSN：项目仅用于报告快照，项目维表使用上面的完整投影API。
-      PROJECT_READ_DSN: project:${PROJECT_MYSQL_PASSWORD}@tcp(project-mysql:3306)/project_management?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci
-      SETTLEMENT_READ_DSN: settlement:${SETTLEMENT_MYSQL_PASSWORD}@tcp(settlement-mysql:3306)/settlement?parseTime=true&charset=utf8mb4&loc=UTC
+      # 默认通过机器HTTP读取报告及财务；只读DSN仅保留显式运维兼容入口。
+      PROJECT_READ_DSN: ${PROJECT_READ_DSN:-}
+      SETTLEMENT_READ_DSN: ${SETTLEMENT_READ_DSN:-}
       OIDC_TENANT_ID: ${OIDC_TENANT_ID}
     depends_on:
       dashboard-migrate:

@@ -501,6 +501,9 @@ func validProductionGeneratedEnvironmentKey(value string) bool {
 // 参数：source 为绑定来源。
 // 返回值：来源和字段是否受支持。
 func validProductionBindingSource(source string) bool {
+	if source == "settlement_dashboard_enabled" || source == "settlement_dashboard_unavailable_reason" || strings.HasPrefix(source, settlementDashboardRelatedPrefix) {
+		return source == "settlement_dashboard_enabled" || source == "settlement_dashboard_unavailable_reason" || source == settlementDashboardRelatedPrefix+"client_id" || source == settlementDashboardRelatedPrefix+"oauth_client_id"
+	}
 	if source == "reimbursement_integration_enabled" || strings.HasPrefix(source, reimbursementRelatedPrefix) {
 		return source == "reimbursement_integration_enabled" || source == reimbursementRelatedPrefix+application.ServiceCredentialReimbursementProjectReferenceRead+".client_id" || source == reimbursementRelatedPrefix+application.ServiceCredentialProjectReimbursementCostWrite+".client_id"
 	}
@@ -526,6 +529,9 @@ func validProductionBindingSource(source string) bool {
 // 参数：app 为接收应用清单，source 为待解析来源。
 // 返回值：是否允许该应用消费该用途或关联身份。
 func productionServiceBindingAllowed(app *productionSubsystemApplicationManifest, source string) bool {
+	if source == "settlement_dashboard_enabled" || source == "settlement_dashboard_unavailable_reason" || strings.HasPrefix(source, settlementDashboardRelatedPrefix) {
+		return app.Code == "settlement" && validProductionBindingSource(source)
+	}
 	if strings.HasPrefix(source, reimbursementRelatedPrefix) || source == "reimbursement_integration_enabled" {
 		return app.Code == "project_management" && validProductionBindingSource(source)
 	}
@@ -556,8 +562,9 @@ func productionServiceBindingAllowed(app *productionSubsystemApplicationManifest
 	return stringSliceContains(hardcodedProductionServiceBindingPurposes(app.Code), purpose)
 }
 
-// hardcodedProductionServiceBindingPurposes 是平台内置默认用途集合（不含恒允许的 audit_ingest）。
-// 清单未声明 allowed_service_bindings 时使用，保证既有子系统行为不变。
+// hardcodedProductionServiceBindingPurposes 返回清单未声明时的默认用途。
+// 参数：applicationCode为接收应用编码。
+// 返回值：默认允许用途，不含恒允许的审计基线。
 func hardcodedProductionServiceBindingPurposes(applicationCode string) []string {
 	switch strings.TrimSpace(applicationCode) {
 	case "reimbursement":
@@ -589,6 +596,8 @@ func hardcodedProductionServiceBindingPurposes(applicationCode string) []string 
 			application.ServiceCredentialSettlementContractIngest,
 			application.ServiceCredentialOwnerDirectoryRead,
 		}
+	case "data_analysis":
+		return []string{application.ServiceCredentialContractDashboardRead, application.ServiceCredentialProjectDashboardRead, application.ServiceCredentialContractImportReportRead, application.ServiceCredentialSettlementDashboardRead}
 	case "project_management":
 		// 服务项操作台需要只读负责人目录来按人员选择团队负责人/项目经理/工程师。
 		return []string{
