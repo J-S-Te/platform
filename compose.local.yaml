@@ -778,7 +778,7 @@ services:
     env_file: *project-db-env
     environment:
       TZ: Asia/Shanghai
-      MYSQL_DSN: project:${PROJECT_MYSQL_PASSWORD}@tcp(project-mysql:3306)/project_management?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci&loc=Asia%2FShanghai
+      MYSQL_DSN: project:${PROJECT_MYSQL_PASSWORD:?PROJECT_MYSQL_PASSWORD must be set; use platform/scripts/docker-local.sh}@tcp(project-mysql:3306)/project_management?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci&loc=Asia%2FShanghai
     entrypoint: ["/usr/local/bin/project-migrate"]
     depends_on:
       project-mysql:
@@ -797,7 +797,7 @@ services:
     environment:
       TZ: Asia/Shanghai
       PM_HTTP_ADDR: :8082
-      MYSQL_DSN: project:${PROJECT_MYSQL_PASSWORD}@tcp(project-mysql:3306)/project_management?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci&loc=Asia%2FShanghai
+      MYSQL_DSN: project:${PROJECT_MYSQL_PASSWORD:?PROJECT_MYSQL_PASSWORD must be set; use platform/scripts/docker-local.sh}@tcp(project-mysql:3306)/project_management?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci&loc=Asia%2FShanghai
       PLATFORM_BASE_URL: http://platform-api:8080
       PLATFORM_AUTHORIZATION_CONTEXT_URL: http://platform-api:8080/oauth2/authorization-context
       DASHBOARD_MACHINE_ENABLED: "true"
@@ -868,7 +868,7 @@ services:
     env_file: *project-runtime-env
     environment:
       TZ: Asia/Shanghai
-      MYSQL_DSN: project:${PROJECT_MYSQL_PASSWORD}@tcp(project-mysql:3306)/project_management?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci&loc=Asia%2FShanghai
+      MYSQL_DSN: project:${PROJECT_MYSQL_PASSWORD:?PROJECT_MYSQL_PASSWORD must be set; use platform/scripts/docker-local.sh}@tcp(project-mysql:3306)/project_management?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci&loc=Asia%2FShanghai
       PLATFORM_BASE_URL: http://platform-api:8080
       SLA_SCAN_INTERVAL: ${SLA_SCAN_INTERVAL:-15m}
       TEMPORAL_ADDRESS: temporal:7233
