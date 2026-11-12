@@ -48,6 +48,10 @@ type PageRequest struct {
 	Page       int
 	PageSize   int
 	UnreadOnly bool
+	// SourceApplication 与 ExcludeSourceApplication 互斥地收窄收件箱来源：
+	// 前者用于“本系统”页签，后者用于“跨系统”页签；空值表示不过滤。
+	SourceApplication        string
+	ExcludeSourceApplication string
 }
 
 // PageResult 是通知查询共用的分页结果结构。
@@ -157,6 +161,7 @@ type Repository interface {
 	CountUnread(ctx context.Context, tenantID, userID string, now time.Time) (int64, error)
 	MarkRead(ctx context.Context, tenantID, userID, deliveryID string, now time.Time) (domain.InboxItem, error)
 	MarkAllRead(ctx context.Context, tenantID, userID string, now time.Time) (int64, error)
+	DeleteReadInbox(ctx context.Context, tenantID, userID string, now time.Time) (int64, error)
 
 	AcceptIngestion(ctx context.Context, tenantID, sourceApplication, sourceEnvironment string, event domain.IngestionEvent, receiptID string, now time.Time) (domain.IngestionReceipt, error)
 	GetIngestionReceipt(ctx context.Context, tenantID, sourceApplication, sourceEnvironment, receiptID string) (domain.IngestionReceipt, error)

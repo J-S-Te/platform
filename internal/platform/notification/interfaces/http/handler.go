@@ -174,6 +174,7 @@ func (h *Handler) CreateTemplate(w http.ResponseWriter, r *http.Request) {
 	}
 	httpresponse.WriteSuccess(w, r, http.StatusCreated, "站内信模板已创建", map[string]any{"template": t, "version": ver})
 }
+
 // ListTemplates 分页返回当前租户的模板列表。
 func (h *Handler) ListTemplates(w http.ResponseWriter, r *http.Request) {
 	p, ok := h.principal(w, r)
@@ -187,6 +188,7 @@ func (h *Handler) ListTemplates(w http.ResponseWriter, r *http.Request) {
 	}
 	httpresponse.WriteSuccess(w, r, http.StatusOK, "站内信模板查询成功", out)
 }
+
 // CreateTemplateVersion 为指定模板发布新版本并立即切换为当前版本。
 func (h *Handler) CreateTemplateVersion(w http.ResponseWriter, r *http.Request) {
 	p, ok := h.principal(w, r)
@@ -204,6 +206,7 @@ func (h *Handler) CreateTemplateVersion(w http.ResponseWriter, r *http.Request) 
 	}
 	httpresponse.WriteSuccess(w, r, http.StatusCreated, "站内信模板版本已发布", map[string]any{"template": t, "version": ver})
 }
+
 // ChangeTemplateStatus 以乐观锁切换模板启用/停用状态，版本冲突返回 409。
 func (h *Handler) ChangeTemplateStatus(w http.ResponseWriter, r *http.Request) {
 	p, ok := h.principal(w, r)
@@ -221,6 +224,7 @@ func (h *Handler) ChangeTemplateStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	httpresponse.WriteSuccess(w, r, http.StatusOK, "站内信模板状态已更新", out)
 }
+
 // CreateMessage 按模板与受众创建站内信，幂等键命中时返回既有消息。
 func (h *Handler) CreateMessage(w http.ResponseWriter, r *http.Request) {
 	p, ok := h.principal(w, r)
@@ -242,6 +246,7 @@ func (h *Handler) CreateMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	httpresponse.WriteSuccess(w, r, http.StatusCreated, "站内信已创建", out)
 }
+
 // ListInbox 返回当前登录用户自己的收件箱分页；不支持查看他人收件箱。
 func (h *Handler) ListInbox(w http.ResponseWriter, r *http.Request) {
 	p, ok := h.principal(w, r)
@@ -257,6 +262,12 @@ func (h *Handler) ListInbox(w http.ResponseWriter, r *http.Request) {
 		}
 		page.UnreadOnly = unreadOnly
 	}
+	page.SourceApplication = strings.TrimSpace(r.URL.Query().Get("source_application"))
+	page.ExcludeSourceApplication = strings.TrimSpace(r.URL.Query().Get("exclude_source_application"))
+	if (page.SourceApplication != "" && page.ExcludeSourceApplication != "") || len(page.SourceApplication) > 64 || len(page.ExcludeSourceApplication) > 64 {
+		h.writeError(w, r, app.ErrValidation)
+		return
+	}
 	out, e := h.service.ListInbox(r.Context(), p.Tenant.ID, p.User.ID, page)
 	if e != nil {
 		h.writeError(w, r, e)
@@ -264,6 +275,7 @@ func (h *Handler) ListInbox(w http.ResponseWriter, r *http.Request) {
 	}
 	httpresponse.WriteSuccess(w, r, http.StatusOK, "站内信列表查询成功", out)
 }
+
 // GetInboxItem 返回当前用户一条收件详情；他人的投递按未找到处理。
 func (h *Handler) GetInboxItem(w http.ResponseWriter, r *http.Request) {
 	p, ok := h.principal(w, r)
@@ -277,6 +289,7 @@ func (h *Handler) GetInboxItem(w http.ResponseWriter, r *http.Request) {
 	}
 	httpresponse.WriteSuccess(w, r, http.StatusOK, "站内信详情查询成功", out)
 }
+
 // UnreadCount 返回当前用户按收件箱可见性口径统计的未读数量。
 func (h *Handler) UnreadCount(w http.ResponseWriter, r *http.Request) {
 	p, ok := h.principal(w, r)
@@ -290,6 +303,7 @@ func (h *Handler) UnreadCount(w http.ResponseWriter, r *http.Request) {
 	}
 	httpresponse.WriteSuccess(w, r, http.StatusOK, "未读站内信数量查询成功", map[string]int64{"unread_count": out})
 }
+
 // MarkRead 标记当前用户一条站内信为已读；操作幂等。
 func (h *Handler) MarkRead(w http.ResponseWriter, r *http.Request) {
 	p, ok := h.principal(w, r)
@@ -303,6 +317,7 @@ func (h *Handler) MarkRead(w http.ResponseWriter, r *http.Request) {
 	}
 	httpresponse.WriteSuccess(w, r, http.StatusOK, "站内信已读状态已更新", out)
 }
+
 // MarkAllRead 把当前用户全部可见未读标记为已读，返回更新条数。
 func (h *Handler) MarkAllRead(w http.ResponseWriter, r *http.Request) {
 	p, ok := h.principal(w, r)
@@ -316,6 +331,21 @@ func (h *Handler) MarkAllRead(w http.ResponseWriter, r *http.Request) {
 	}
 	httpresponse.WriteSuccess(w, r, http.StatusOK, "站内信已全部标记为已读", map[string]int64{"updated_count": out})
 }
+
+// DeleteRead 软删除当前用户全部已读站内信，返回实际删除条数；未读与其他用户的通知不受影响。
+func (h *Handler) DeleteRead(w http.ResponseWriter, r *http.Request) {
+	p, ok := h.principal(w, r)
+	if !ok {
+		return
+	}
+	out, e := h.service.DeleteRead(r.Context(), p.Tenant.ID, p.User.ID)
+	if e != nil {
+		h.writeError(w, r, e)
+		return
+	}
+	httpresponse.WriteSuccess(w, r, http.StatusOK, "已删除当前用户全部已读站内信", map[string]int64{"deleted_count": out})
+}
+
 // ListDeliveries 是租户运营视角的投递分页查询，可按状态过滤。
 func (h *Handler) ListDeliveries(w http.ResponseWriter, r *http.Request) {
 	p, ok := h.principal(w, r)

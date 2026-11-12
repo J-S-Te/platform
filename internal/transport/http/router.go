@@ -559,6 +559,7 @@ func NewRouter(
 			apiRouter.GET("/notifications/inbox/:delivery_id", adaptHandler(operational.Notifications.GetInboxItem))
 			apiRouter.POST("/notifications/inbox/:delivery_id/read", adaptHandler(operational.Notifications.MarkRead))
 			apiRouter.POST("/notifications/inbox/read-all", adaptHandler(operational.Notifications.MarkAllRead))
+			apiRouter.POST("/notifications/inbox/read/delete", adaptHandler(operational.Notifications.DeleteRead))
 		}
 
 		if operational.AsyncJobs != nil {

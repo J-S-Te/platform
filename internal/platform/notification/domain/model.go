@@ -179,14 +179,15 @@ type Delivery struct {
 
 // InboxItem 是对收件人安全的站内信投影；客户端跳转关联目标时须重新授权。
 type InboxItem struct {
-	DeliveryID    string     `json:"delivery_id"`
-	MessageID     string     `json:"message_id"`
-	Category      string     `json:"category"`
-	Title         string     `json:"title"`
-	Content       string     `json:"content"`
-	TargetURL     string     `json:"target_url"`
-	ReferenceType string     `json:"reference_type"`
-	ReferenceID   string     `json:"reference_id"`
-	DeliveredAt   time.Time  `json:"delivered_at"`
-	ReadAt        *time.Time `json:"read_at"`
+	DeliveryID        string     `json:"delivery_id"`
+	MessageID         string     `json:"message_id"`
+	SourceApplication string     `json:"source_application"`
+	Category          string     `json:"category"`
+	Title             string     `json:"title"`
+	Content           string     `json:"content"`
+	TargetURL         string     `json:"target_url"`
+	ReferenceType     string     `json:"reference_type"`
+	ReferenceID       string     `json:"reference_id"`
+	DeliveredAt       time.Time  `json:"delivered_at"`
+	ReadAt            *time.Time `json:"read_at"`
 }
