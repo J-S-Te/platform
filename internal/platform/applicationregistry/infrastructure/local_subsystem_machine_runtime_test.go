@@ -170,3 +170,41 @@ func TestLocalProjectUpdateSkipsFileGatewayWithoutCredential(t *testing.T) {
 		t.Fatal("managed rewrite dropped unmanaged runtime key")
 	}
 }
+
+// TestLocalProjectUpdateWritesAuditPublisherCredential 覆盖项目受控更新：平台会轮换审计
+// 发布者密钥，更新路径必须把新 client/secret 写回运行文件；否则项目继续用旧 secret
+// 调用平台审计入口并持续 401（2026-11-12 本地实测）。
+func TestLocalProjectUpdateWritesAuditPublisherCredential(t *testing.T) {
+	t.Parallel()
+	path := contractMachineTestEnvironment(t)
+	input := p1FixtureProvisioningInput(application.SubsystemProvisioningInput{
+		ApplicationCode: integratedProjectApplicationCode,
+		Environment:     "staging",
+		ServiceCredentials: []application.SubsystemServiceCredential{{
+			Purpose:         application.ServiceCredentialAuditIngest,
+			OAuthClient:     application.OAuthClientView{ClientID: "project_management-staging-audit-publisher"},
+			PlaintextSecret: "project-audit-test-secret",
+		}},
+	})
+	if err := (&LocalDockerSubsystemProvisioner{}).updateServiceCredentialRuntimeConfiguration(input, path); err != nil {
+		t.Fatalf("update project machine runtime: %v", err)
+	}
+	assertRuntimeValues(t, path, map[string]string{
+		"PLATFORM_AUDIT_CLIENT_ID":     "project_management-staging-audit-publisher",
+		"PLATFORM_AUDIT_CLIENT_SECRET": "project-audit-test-secret",
+	})
+}
+
+// TestLocalProjectUpdateRequiresAuditPublisherCredential 断言缺少受控审计凭据时失败关闭，
+// 不允许把空值写进运行文件或静默沿用旧 secret。
+func TestLocalProjectUpdateRequiresAuditPublisherCredential(t *testing.T) {
+	t.Parallel()
+	path := contractMachineTestEnvironment(t)
+	input := p1FixtureProvisioningInput(application.SubsystemProvisioningInput{
+		ApplicationCode: integratedProjectApplicationCode,
+		Environment:     "staging",
+	})
+	if err := (&LocalDockerSubsystemProvisioner{}).updateServiceCredentialRuntimeConfiguration(input, path); err == nil {
+		t.Fatal("expected missing project audit credential to fail closed")
+	}
+}
