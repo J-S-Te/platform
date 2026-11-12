@@ -13,6 +13,68 @@ import (
 	"github.com/J-S-Te/Basic-Platform/internal/shared/httpresponse"
 )
 
+// updateGateway 是仅重建时从登记回调地址反推出的网关公开配置。
+type updateGateway struct {
+	publicURL   string
+	redirectURI string
+	pathPrefix  string
+}
+
+// deriveGatewayFromRedirectURI 从规范 OAuth 回调地址反推公开基地址与路径前缀。
+// 仅接受形如 scheme://host/prefix/auth/callback 的地址；其它形态返回 false，
+// 调用方保持原"仅重建、不下发浏览器 URL"的语义。
+// 参数：raw 为控制面登记的回调地址。
+// 返回值：公开基地址、路径前缀以及是否可推导。
+func deriveGatewayFromRedirectURI(raw string) (string, string, bool) {
+	const callback = "/auth/callback"
+	value := strings.TrimSpace(raw)
+	if !strings.HasSuffix(value, callback) {
+		return "", "", false
+	}
+	trimmed := strings.TrimSuffix(value, callback)
+	schemeEnd := strings.Index(trimmed, "://")
+	if schemeEnd <= 0 {
+		return "", "", false
+	}
+	rest := trimmed[schemeEnd+3:]
+	slash := strings.Index(rest, "/")
+	if slash <= 0 {
+		return "", "", false
+	}
+	host, prefix := rest[:slash], rest[slash:]
+	if host == "" || prefix == "" || prefix == "/" {
+		return "", "", false
+	}
+	return trimmed[:schemeEnd+3] + host, prefix, true
+}
+
+// derivedUpdateGateway 读取当前环境登记的回调地址并推导网关公开配置。
+// 参数：ctx 为请求上下文，tenantID/applicationCode/environment 定位环境。
+// 返回值：可推导时返回网关配置；能力缺失、登记缺失或地址不规范时返回 false。
+func (handler *SubsystemOnboardingHandler) derivedUpdateGateway(ctx context.Context, tenantID, applicationCode, environment string) (updateGateway, bool) {
+	resolver, ok := handler.service.(subsystemEnvironmentRedirectURIResolver)
+	if !ok {
+		return updateGateway{}, false
+	}
+	applicationID, environmentID, err := handler.service.ResolveApplicationEnvironment(ctx, tenantID, applicationCode, environment)
+	if err != nil || strings.TrimSpace(applicationID) == "" || strings.TrimSpace(environmentID) == "" {
+		return updateGateway{}, false
+	}
+	redirectURI, err := resolver.ResolveApplicationEnvironmentRedirectURI(ctx, tenantID, applicationID, environmentID)
+	if err != nil {
+		return updateGateway{}, false
+	}
+	publicBaseURL, pathPrefix, ok := deriveGatewayFromRedirectURI(redirectURI)
+	if !ok {
+		return updateGateway{}, false
+	}
+	return updateGateway{
+		publicURL:   strings.TrimRight(publicBaseURL, "/") + pathPrefix + "/",
+		redirectURI: strings.TrimSpace(redirectURI),
+		pathPrefix:  pathPrefix,
+	}, true
+}
+
 // OnboardSubsystem 通过既有受控接入流程创建子系统配置。
 //
 //	OnboardSubsystem 处理 POST /api/v1/subsystem-onboarding。
@@ -605,6 +667,15 @@ func (handler *SubsystemOnboardingHandler) updateSubsystem(writer stdhttp.Respon
 	if err != nil {
 		handler.writeError(writer, request, err)
 		return
+	}
+	// 仅重建（请求未携带网关字段）时，从已登记的回调地址反推公开配置：
+	// reimbursement 等子系统把 PUBLIC_BASE_URL 当作启动必填键，空值会让容器 health 失败。
+	if updateInput.PublicURL == "" {
+		if gateway, ok := handler.derivedUpdateGateway(request.Context(), principal.Tenant.ID, applicationCode, environment); ok {
+			updateInput.PublicURL = gateway.publicURL
+			updateInput.RedirectURI = gateway.redirectURI
+			updateInput.PathPrefix = gateway.pathPrefix
+		}
 	}
 	updateInput.CentralSessionPolicy = handler.centralSessionPolicy
 	// 生产模式下 Agent 只接受随发布包审核的清单目标，并要求请求携带清单校验和。API 侧

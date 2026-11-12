@@ -20,4 +20,21 @@ func TestLocalLicenseComposeProfilesIncludeReimbursement(t *testing.T) {
 			t.Fatalf("missing required compose profile %q", required)
 		}
 	}
+	// 集成子系统重建路径与许可镜像解析路径必须共用同一份 profile 标志。
+	args := localLicenseComposeProfileArgs()
+	if len(args) != len(localLicenseComposeProfiles)*2 {
+		t.Fatalf("profile args = %v; want %d entries", args, len(localLicenseComposeProfiles)*2)
+	}
+	flags := map[string]bool{}
+	for i := 0; i < len(args); i += 2 {
+		if args[i] != "--profile" {
+			t.Fatalf("unexpected compose flag %q", args[i])
+		}
+		flags[args[i+1]] = true
+	}
+	for _, required := range []string{"reimbursement", "reimbursement-release"} {
+		if !flags[required] {
+			t.Fatalf("profile args missing %q: %v", required, args)
+		}
+	}
 }

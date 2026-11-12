@@ -1818,6 +1818,9 @@ func (provisioner *LocalDockerSubsystemProvisioner) executeIntegratedPlatformCom
 		"--env-file", analysisEnvironment,
 		"-f", composeFile,
 	}
+	// 集成拓扑里报销等服务受 compose profile 控制：不显式启用 profile 时，
+	// 重建路径会以 no such service 拒绝 reimbursement-mysql/migrate/api/worker。
+	composeArguments = append(composeArguments, localLicenseComposeProfileArgs()...)
 	if !slices.Contains(arguments, "build") {
 		if override, err := provisioner.localRuntimeOverride(); err != nil {
 			return nil, err

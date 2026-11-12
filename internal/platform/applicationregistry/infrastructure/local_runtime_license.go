@@ -50,6 +50,19 @@ var localLicenseComposeProfiles = []string{
 	"reimbursement", "reimbursement-release",
 }
 
+// localLicenseComposeProfileArgs 返回 compose 全局的 profile 标志。
+// 许可镜像解析与集成子系统重建必须共用同一份 profile 集合，否则两条路径会各自漏加，
+// 表现为 local service image missing 或 no such service。
+// 参数：无。
+// 返回值：形如 --profile X 的参数切片。
+func localLicenseComposeProfileArgs() []string {
+	args := make([]string, 0, len(localLicenseComposeProfiles)*2)
+	for _, profile := range localLicenseComposeProfiles {
+		args = append(args, "--profile", profile)
+	}
+	return args
+}
+
 type localRuntimeRelease struct {
 	Migration     localLicenseMigration                `json:"migration"`
 	Version       int                                  `json:"version"`
@@ -333,9 +346,7 @@ func (p *LocalDockerSubsystemProvisioner) localComposeImages(ctx context.Context
 		"--env-file", filepath.Join(filepath.Dir(root), "data_analysis", ".env.local"),
 		"--env-file", filepath.Join(filepath.Dir(root), "Settlement", ".env.local"),
 	}
-	for _, profile := range localLicenseComposeProfiles {
-		args = append(args, "--profile", profile)
-	}
+	args = append(args, localLicenseComposeProfileArgs()...)
 	args = append(args, "-f", composePath, "config", "--format", "json")
 	out, err := p.localDockerProjectionLimit(ctx, 2<<20, args...)
 	if err != nil {
