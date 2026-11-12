@@ -11,3 +11,16 @@
 - 完成前运行与变更相关的真实验证，报告命令、结果和限制；源码完成、测试通过、真实业务验收和部署成功不可混淆。
 - 凭据、Token、私钥、运行配置及客户敏感内容不得写入日志、上下文或测试证据；许可证/运行批准门禁不得绕过。
 
+## 本地服务重建（2026-11-12 补充）
+
+- 本地栈一律通过 `platform/scripts/docker-local.sh` 的 `up` / `restart` / `refresh-<service>` 操作；
+  不要用裸 `docker compose -f compose.local.yaml up --force-recreate <service>` 重建业务容器。
+- 裸 compose 会静默把 `\${PROJECT_MYSQL_PASSWORD}` 等按服务注入的变量展开为空，
+  容器以空口令启动并因 `Access denied ... (using password: NO)` 重启循环。
+- 许可 env/卷来自脚本 `compose()` 自动追加的 `runtime/local-license.compose.json`；
+  裸 compose 缺少它会导致 `commercial license configuration failed` 重启循环。
+- 确需手工排查时，必须同时追加 `-f runtime/local-license.compose.json`，
+  并从对应 MySQL 容器注入 `*_MYSQL_PASSWORD`（如 `PROJECT_MYSQL_PASSWORD`）；
+  该方式仅限本地排障，不得用于生产/测试服。
+- 正确示例：`bash platform/scripts/docker-local.sh refresh-project-api`；
+  改了 `project_management/.env.local` 后需要重建而非仅 `docker restart`（restart 不重读 env_file）。
