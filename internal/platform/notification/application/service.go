@@ -279,6 +279,14 @@ func (service *Service) MarkAllRead(ctx context.Context, tenantID, userID string
 	return service.repository.MarkAllRead(ctx, strings.TrimSpace(tenantID), strings.TrimSpace(userID), service.clock.Now().UTC())
 }
 
+// DeleteRead 软删除当前用户全部已读站内信，返回实际删除条数；未读与其他用户的通知不受影响。
+func (service *Service) DeleteRead(ctx context.Context, tenantID, userID string) (int64, error) {
+	if strings.TrimSpace(tenantID) == "" || strings.TrimSpace(userID) == "" {
+		return 0, ErrValidation
+	}
+	return service.repository.DeleteReadInbox(ctx, strings.TrimSpace(tenantID), strings.TrimSpace(userID), service.clock.Now().UTC())
+}
+
 func normalizePage(page PageRequest) PageRequest {
 	if page.Page < 1 {
 		page.Page = 1
