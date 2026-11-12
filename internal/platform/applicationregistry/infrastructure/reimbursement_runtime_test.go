@@ -216,6 +216,10 @@ func TestReimbursementLocalSessionKeyLifecycle(t *testing.T) {
 	valid := "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
 	existing := "MYSQL_DSN=fixture\nREIMBURSEMENT_MYSQL_PASSWORD=fixture\n" +
 		"REIMBURSEMENT_MYSQL_ROOT_PASSWORD=fixture\n"
+	// 首次接入失败会留下"键存在但值为空"的运行文件；这类材料没有任何可轮换的加密会话，
+	// 必须允许 retry 重新生成，否则部署会永久卡在 controlled recovery。
+	emptyPlaceholders := "MYSQL_DSN=\nREIMBURSEMENT_MYSQL_PASSWORD=\n" +
+		"REIMBURSEMENT_MYSQL_ROOT_PASSWORD=\nOIDC_SESSION_ENCRYPTION_KEY_BASE64=\n"
 	for _, tc := range []struct {
 		name      string
 		fresh     bool
@@ -224,10 +228,11 @@ func TestReimbursementLocalSessionKeyLifecycle(t *testing.T) {
 	}{
 		{"fresh", true, "", false},
 		{"existing_missing_key", false, existing, true},
-		{"existing_file_missing", false, "", true},
 		{"fresh_flag_existing_missing_key", true, existing, true},
 		{"existing_preserved", false, existing + "OIDC_SESSION_ENCRYPTION_KEY_BASE64=" + valid + "\n", false},
 		{"existing_invalid", false, existing + "OIDC_SESSION_ENCRYPTION_KEY_BASE64=invalid\n", true},
+		{"first_attempt_missing_file", false, "", false},
+		{"first_attempt_empty_placeholders", false, emptyPlaceholders, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "synthetic.env")
@@ -246,8 +251,12 @@ func TestReimbursementLocalSessionKeyLifecycle(t *testing.T) {
 				if err != nil || len(decoded) != 32 {
 					t.Fatal("session key is not 32 bytes")
 				}
-				if !tc.fresh && values["OIDC_SESSION_ENCRYPTION_KEY_BASE64"] != valid {
+				if strings.Contains(tc.current, "OIDC_SESSION_ENCRYPTION_KEY_BASE64="+valid) &&
+					values["OIDC_SESSION_ENCRYPTION_KEY_BASE64"] != valid {
 					t.Fatal("existing session key changed")
+				}
+				if !strings.HasPrefix(values["MYSQL_DSN"], "reimbursement:") {
+					t.Fatal("mysql dsn was not derived from generated credentials")
 				}
 			}
 		})

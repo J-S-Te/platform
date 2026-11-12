@@ -86,7 +86,8 @@ func projectReimbursementRuntimeValues(input application.SubsystemProvisioningIn
 }
 
 // reimbursementLocalRuntimeValues 向报销本地运行文件投递独立用途凭据与公开接入配置。
-// 参数：input为受控登记输入，path为来源文件，values接收本次原子更新，fresh标识首次接入。
+// 参数：input为受控登记输入，path为来源文件，values接收本次原子更新；fresh只用于区分调用来源，
+// 是否允许生成会话密钥一律以现有 MYSQL_DSN 是否为空为准（空=从未完成数据库交付）。
 // 返回值：全部机器归属和scope精确匹配时成功；缺secret仅允许同身份安全保留。
 func reimbursementLocalRuntimeValues(input application.SubsystemProvisioningInput, path string, values map[string]string, fresh bool) error {
 	current := map[string]string{}
@@ -133,9 +134,9 @@ func reimbursementLocalRuntimeValues(input application.SubsystemProvisioningInpu
 	return reimbursementCostRuntimeValues(input, values)
 }
 
-// reimbursementLocalSecrets 保留已交付数据库与会话材料，初装时生成独立随机值。
-// 参数：current为当前受控配置，values接收新值，fresh标识确认首次接入。
-// 返回值：初装或已有材料合法时成功；既有材料损坏时拒绝静默轮换。
+// reimbursementLocalSecrets 保留已交付数据库与会话材料，初装或从未完成交付时生成独立随机值。
+// 参数：current为当前受控配置，values接收新值，fresh只用于区分调用来源。
+// 返回值：从未交付、初装或已有材料合法时成功；已交付库缺材料时拒绝静默轮换。
 func reimbursementLocalSecrets(current, values map[string]string, fresh bool) error {
 	for _, key := range []string{"REIMBURSEMENT_MYSQL_PASSWORD", "REIMBURSEMENT_MYSQL_ROOT_PASSWORD"} {
 		raw := current[key]
@@ -153,7 +154,10 @@ func reimbursementLocalSecrets(current, values map[string]string, fresh bool) er
 	}
 	key := current["OIDC_SESSION_ENCRYPTION_KEY_BASE64"]
 	if key == "" {
-		if !fresh || current["MYSQL_DSN"] != "" {
+		// 空 MYSQL_DSN 表示该应用从未完成过数据库交付（首次接入失败，或历史上只写了空占位键）：
+		// 此时不存在可被轮换失效的加密会话，按初装生成独立密钥。
+		// 只有 DSN 非空（确有已交付库）却缺密钥，才是真正的材料缺损，必须走受控恢复。
+		if current["MYSQL_DSN"] != "" {
 			return provisioningError("reimbursement session key requires controlled recovery; do not rotate implicitly")
 		}
 		raw := make([]byte, 32)
