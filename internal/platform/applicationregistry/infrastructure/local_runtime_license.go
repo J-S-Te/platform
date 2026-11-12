@@ -41,6 +41,15 @@ type localLicenseMigration struct {
 
 var localLicenseMigrations = map[string]string{"reimbursement": "reimbursement-migrate", "contract_management": "contract-migrate", "customer_and_opportunity": "customer-migrate", "customer_portal": "portal-migrate", "project_management": "project-migrate", "settlement": "settlement-migrate", "data_analysis": "dashboard-migrate"}
 
+// localLicenseComposeProfiles 是本地许可运行态解析镜像时必须启用的 compose profile 全集。
+// 报销服务（api/worker/migrate/catalog-sync）只在这些 profile 下才会被 compose config 展开；
+// 缺任一 profile 会表现为 local service image missing 或 local migration image missing，
+// 且失败后 retry 仍会重复同一错误。
+var localLicenseComposeProfiles = []string{
+	"bootstrap", "customer", "portal", "project", "data-analysis", "presale-worker",
+	"reimbursement", "reimbursement-release",
+}
+
 type localRuntimeRelease struct {
 	Migration     localLicenseMigration                `json:"migration"`
 	Version       int                                  `json:"version"`
@@ -314,7 +323,8 @@ func (p *LocalDockerSubsystemProvisioner) localComposeImages(ctx context.Context
 	if err := safeLocalPath(composePath, false); err != nil {
 		return nil, err
 	}
-	out, err := p.localDockerProjectionLimit(ctx, 2<<20, "compose", "-p", p.config.PlatformComposeProject,
+	args := []string{
+		"compose", "-p", p.config.PlatformComposeProject,
 		"--env-file", filepath.Join(root, "docker", ".env.local"),
 		"--env-file", filepath.Join(filepath.Dir(root), "contract_management", ".env.local"),
 		"--env-file", filepath.Join(root, "docker", ".env.customer.local"),
@@ -322,8 +332,12 @@ func (p *LocalDockerSubsystemProvisioner) localComposeImages(ctx context.Context
 		"--env-file", filepath.Join(filepath.Dir(root), "project_management", ".env.local"),
 		"--env-file", filepath.Join(filepath.Dir(root), "data_analysis", ".env.local"),
 		"--env-file", filepath.Join(filepath.Dir(root), "Settlement", ".env.local"),
-		"--profile", "bootstrap", "--profile", "customer", "--profile", "portal", "--profile", "project", "--profile", "data-analysis", "--profile", "presale-worker",
-		"-f", composePath, "config", "--format", "json")
+	}
+	for _, profile := range localLicenseComposeProfiles {
+		args = append(args, "--profile", profile)
+	}
+	args = append(args, "-f", composePath, "config", "--format", "json")
+	out, err := p.localDockerProjectionLimit(ctx, 2<<20, args...)
 	if err != nil {
 		return nil, err
 	}
