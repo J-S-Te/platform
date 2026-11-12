@@ -698,6 +698,20 @@ func (provisioner *LocalDockerSubsystemProvisioner) updateServiceCredentialRunti
 			values["ATTACHMENT_FILE_GATEWAY_CLIENT_ID"] = credential.OAuthClient.ClientID
 			values["ATTACHMENT_FILE_GATEWAY_CLIENT_SECRET"] = credential.PlaintextSecret
 		}
+	case integratedProjectApplicationCode:
+		// 受控更新会轮换项目审计发布者密钥；更新路径必须把新 client/secret 写回运行文件，
+		// 否则项目继续用旧 secret 调用平台审计入口并持续 401。首次接入由 applyLocked 下发，
+		// 这里补齐更新路径，保持两条路径一致。
+		auditCredential, ok := input.ServiceCredential(application.ServiceCredentialAuditIngest)
+		if !ok {
+			return provisioningError("project audit publisher credential is unavailable")
+		}
+		expectedAuditClientID := input.ApplicationCode + "-" + input.Environment + "-audit-publisher"
+		if auditCredential.OAuthClient.ClientID != expectedAuditClientID {
+			return provisioningError("project audit publisher credential does not match the target environment")
+		}
+		values["PLATFORM_AUDIT_CLIENT_ID"] = auditCredential.OAuthClient.ClientID
+		values["PLATFORM_AUDIT_CLIENT_SECRET"] = auditCredential.PlaintextSecret
 	case integratedContractApplicationCode:
 		if err := contractNotificationRuntimeValues(input, values, false); err != nil {
 			return err
