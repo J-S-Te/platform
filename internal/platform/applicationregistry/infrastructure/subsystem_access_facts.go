@@ -65,7 +65,9 @@ type subsystemAccessRegistryRow struct {
 	EnvironmentSta string
 }
 
-// ReadSubsystemAccessFacts 读取判定所需事实；任何一步失败都返回错误（不猜测、不默认就绪）。
+// ReadSubsystemAccessFacts 读取判定所需事实并绑定当前模式的目标配置。
+// 参数：ctx 为上下文，tenantID、applicationCode、environmentCode 为租户及授权目标。
+// 返回值：返回事实和预览版本；任一必需来源失败时返回错误。
 func (adapter *SubsystemAccessFactsAdapter) ReadSubsystemAccessFacts(ctx context.Context, tenantID, applicationCode, environmentCode string) (application.SubsystemAccessFacts, application.SubsystemAccessPreviewVersion, error) {
 	tenantID = strings.TrimSpace(tenantID)
 	applicationCode = strings.TrimSpace(applicationCode)
@@ -83,12 +85,10 @@ func (adapter *SubsystemAccessFactsAdapter) ReadSubsystemAccessFacts(ctx context
 			containsCapability(capabilities.SupportedEnvironments, environmentCode),
 	}
 	// 清单摘要：提交时必须与预览时一致，否则要求重新预览。
-	for _, target := range capabilities.Targets {
-		if strings.EqualFold(strings.TrimSpace(target.ApplicationCode), applicationCode) &&
-			strings.EqualFold(strings.TrimSpace(target.Environment), environmentCode) {
-			facts.ManifestChecksum = strings.TrimSpace(target.ManifestChecksum)
-			break
-		}
+	if target, found := subsystemAccessTarget(capabilities, application.SubsystemAccessOperation{
+		ApplicationCode: applicationCode, EnvironmentCode: environmentCode,
+	}); found {
+		facts.ManifestChecksum = strings.TrimSpace(target.ManifestChecksum)
 	}
 
 	registry, found, err := adapter.readRegistry(ctx, tenantID, applicationCode, environmentCode)
