@@ -107,8 +107,19 @@ func (repository *GORMRepository) UpdateLoginPolicy(ctx context.Context, input s
 // 参数：ctx为请求，input为非秘密登录证据，policy为租户策略，now为平台时钟。
 // 返回值：锁定状态；存储或撤销失败会回滚整个锁定事务。
 func (repository *GORMRepository) RecordFailedLogin(ctx context.Context, input securityapplication.LoginFailureInput, policy securitydomain.LoginPolicy, now time.Time) (securityapplication.LoginFailureResult, error) {
+	var identity string
+	if repository.central {
+		var err error
+		identity, err = sessionstore.AccountIdentityForLock(ctx, repository.database, input.TenantID, input.AccountID)
+		if err != nil {
+			return securityapplication.LoginFailureResult{}, err
+		}
+	}
 	var result securityapplication.LoginFailureResult
 	err := repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
+		if err := sessionstore.LockIdentityTx(transaction, input.TenantID, identity); err != nil {
+			return err
+		}
 		var account struct {
 			LockedUntil *time.Time `gorm:"column:locked_until"`
 		}

@@ -141,17 +141,10 @@ func (repository *GORMRepository) RecordSuccessfulPasswordVerification(ctx conte
 	})
 }
 
-// CreateSession 创建平台会话并按启用策略附着中央周期。
+// CreateSession 按人员、账号顺序加锁，原子执行登录门禁和中央周期关联。
+// 参数：ctx为请求，account为已验证账号，session为新会话，idleTimeout为空闲期限，
 //
-//	CreateSession 以账号行的排他锁串行化同一账号的登录。清理过期会话、判断并发会话、
-//	可选替换旧会话和插入新会话处于同一事务，两个终端不能同时越过活动会话检查。
-//
-// 参数：ctx为调用上下文与取消边界。
-//
-//	account为当前租户内账号记录。
-//	session为当前浏览器的服务端会话。
-//	idleTimeout为平台策略给出的空闲期限。
-//	replaceExisting为是否显式替换原登录会话。
+//	replaceExisting表示是否显式替换原登录会话。
 //
 // 返回值：无；参数、校验、存储或依赖失败时返回错误。
 func (repository *GORMRepository) CreateSession(ctx context.Context, account domain.LoginAccount, session domain.Session, idleTimeout time.Duration, replaceExisting bool) error {
@@ -161,6 +154,9 @@ func (repository *GORMRepository) CreateSession(ctx context.Context, account dom
 	return repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
 		now := session.CreatedAt.UTC()
 		idleCutoff := now.Add(-idleTimeout)
+		if err := lockLoginIdentity(transaction, account, now); err != nil {
+			return err
+		}
 		activeUser := transaction.Model(&userModel{}).
 			Select("1").
 			Where("id = iam_account.user_id AND tenant_id = iam_account.tenant_id AND status = ? AND (valid_until IS NULL OR valid_until > ?)", domain.StatusActive, now)
@@ -538,8 +534,15 @@ func (repository *GORMRepository) RevokeSession(ctx context.Context, sessionID s
 // 参数：ctx为请求，tenantID/accountID为可信账号范围，revokedAt/reason为撤销证据。
 // 返回值：数据库失败或旧模式无活跃会话时错误；中央模式覆盖无IAM关联的业务周期。
 func (repository *GORMRepository) RevokeAccountSessions(ctx context.Context, tenantID, accountID string, revokedAt time.Time, reason string) error {
+	identity, err := repository.accountIdentityForLock(ctx, tenantID, accountID)
+	if err != nil {
+		return err
+	}
 	hadActiveSessions := false
-	err := repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
+	err = repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
+		if err := sessionstore.LockIdentityTx(transaction, tenantID, identity); err != nil {
+			return err
+		}
 		active, err := repository.revokeAccountSessionsTx(transaction, tenantID, accountID, revokedAt, reason)
 		if err != nil {
 			return err

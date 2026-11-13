@@ -343,20 +343,20 @@ func (r *Repository) FindAuthorizationCode(ctx context.Context, codeHash [32]byt
 	return authorizationCodeFromRow(row), nil
 }
 
-// ConsumeAuthorizationCode 原子消费绑定客户端的一次性授权码。
-//
-//	ConsumeAuthorizationCode 锁定授权码摘要行，在事务内重做客户端、回调地址、授权模式和会话校验，
-//	并原子地消费授权码、创建首个刷新令牌族节点。应用层的预校验不能替代这里的最终提交判断。
-//
-// 参数：ctx为调用上下文与取消边界。
-//
-//	command为已校验的持久化操作输入。
-//	now为本次服务端校验时间。
-//
-// 返回值：与该调用匹配的核验或持久化结果；失败保留原有错误语义。
+// ConsumeAuthorizationCode 先锁人员再锁授权码，原子复验并消费一次性授权。
+// 参数：ctx为请求，command为客户端、回调和刷新材料，now为本次校验时钟。
+// 返回值：锁内完整核验后的令牌授权；失效、范围冲突或依赖故障时回滚并返回错误。
 func (r *Repository) ConsumeAuthorizationCode(ctx context.Context, command application.ConsumeAuthorizationCodeCommand, now time.Time) (domain.TokenGrant, error) {
+	// 授权码属主不可变，事务外查询仅确定锁键，不替代下方锁内全部复验。
+	identity, err := r.FindAuthorizationCode(ctx, command.CodeHash, now)
+	if err != nil {
+		return domain.TokenGrant{}, err
+	}
 	var grant domain.TokenGrant
-	err := r.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	err = r.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := sessionstore.LockIdentityTx(tx, identity.TenantID, identity.UserID); err != nil {
+			return err
+		}
 		var code authorizationCodeRow
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Table("oauth_authorization_code").Where("code_hash = ?", command.CodeHash[:]).Take(&code).Error; err != nil {
 			return mapError(err)

@@ -21,7 +21,7 @@ func LinkPlatformTx(tx *gorm.DB, anchor domain.PlatformAnchor, centralID string)
 	}
 	var session domain.Session
 	if centralID != "" {
-		session, _, err = activeAnchor(tx, centralID, now)
+		session, _, err = activeAnchor(tx, centralID, now, true)
 		if err != nil {
 			return session, err
 		}
@@ -67,7 +67,7 @@ func (s *Store) PlatformState(ctx context.Context, iamID string, now time.Time, 
 		if err := tx.Table("sgov_platform_link").Where("iam_session_id = ?", iamID).Take(&link).Error; err != nil {
 			return inactiveMissing(err)
 		}
-		anchor, p, err := activeAnchor(tx, link.SessionID, now)
+		anchor, p, err := activeAnchor(tx, link.SessionID, now, interact)
 		if err != nil {
 			return err
 		}

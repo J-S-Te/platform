@@ -74,6 +74,9 @@ func (*staleCredentialConn) ExecContext(context.Context, string, []driver.NamedV
 	return staleCredentialResult(1), nil
 }
 
+// QueryContext 为凭据回归提供人员锁和当前密码摘要的最小查询结果。
+// 参数：上下文未使用，query为实际SQL，values为绑定的账号和凭据参数。
+// 返回值：测试行；旧密码在账号查询中保持零行，不能绕过真实断言。
 func (c *staleCredentialConn) QueryContext(_ context.Context, query string, values []driver.NamedValue) (driver.Rows, error) {
 	args := make([]driver.Value, 0, len(values))
 	hashMatches := false
@@ -87,6 +90,9 @@ func (c *staleCredentialConn) QueryContext(_ context.Context, query string, valu
 	c.scenario.args = append(c.scenario.args, args)
 
 	lowered := strings.ToLower(query)
+	if strings.Contains(lowered, "from `iam_user`") && !strings.Contains(lowered, "from `iam_account`") {
+		return &staleCredentialRows{columns: []string{"id"}, values: [][]driver.Value{{"user-1"}}}, nil
+	}
 	if strings.Contains(lowered, "from `iam_account`") || strings.Contains(lowered, "from iam_account") {
 		if !hashMatches {
 			// 密码已被重置：不存在"刚刚验证过的那条凭据"，登录必须失败关闭。
@@ -135,6 +141,9 @@ func TestRecordSuccessfulPasswordVerificationRequiresVerifiedCredential(t *testi
 	}
 }
 
+// TestCreateSessionRejectsSessionWhenPasswordChangedAfterVerification 验证旧密码不能创建新会话。
+// 参数：t为测试上下文，模拟密码在校验后被管理员重置。
+// 返回值：无；账号锁定未绑定刚验证的摘要或旧密码被接受时失败。
 func TestCreateSessionRejectsSessionWhenPasswordChangedAfterVerification(t *testing.T) {
 	scenario := &staleCredentialScenario{currentHash: []byte("current-hash")}
 	repository := newStaleCredentialRepository(t, scenario)
@@ -147,12 +156,15 @@ func TestCreateSessionRejectsSessionWhenPasswordChangedAfterVerification(t *test
 	if !errors.Is(err, application.ErrUnauthenticated) {
 		t.Fatalf("密码重置后建立会话 error = %v, want ErrUnauthenticated", err)
 	}
-	if len(scenario.queries) == 0 || !strings.Contains(strings.ToLower(scenario.queries[0]), "password_hash") {
+	query := sessionAccountLockQuery(t, scenario)
+	if !strings.Contains(strings.ToLower(query), "password_hash") {
 		t.Fatalf("账号锁定语句必须校验刚刚验证过的密码摘要: %v", scenario.queries)
 	}
 }
 
-// OIDC 登录没有本地密码：不得因为没有密码凭据而拒绝建立会话。
+// TestCreateSessionDoesNotRequirePasswordCredentialForOIDCLogin 验证OIDC不附加本地密码条件。
+// 参数：t为测试上下文，使用无本地密码的已验证OIDC账号。
+// 返回值：无；人员加锁后未执行账号查询或错误要求密码摘要时失败。
 func TestCreateSessionDoesNotRequirePasswordCredentialForOIDCLogin(t *testing.T) {
 	scenario := &staleCredentialScenario{currentHash: []byte("current-hash")}
 	repository := newStaleCredentialRepository(t, scenario)
@@ -162,10 +174,25 @@ func TestCreateSessionDoesNotRequirePasswordCredentialForOIDCLogin(t *testing.T)
 	}, domain.Session{ID: "session-1", TenantID: "tenant-1", AccountID: "account-1", CreatedAt: time.Now().UTC()},
 		30*time.Minute, false)
 
-	if len(scenario.queries) == 0 {
-		t.Fatal("OIDC 登录必须执行账号锁定查询")
+	query := sessionAccountLockQuery(t, scenario)
+	if strings.Contains(strings.ToLower(query), "password_hash") {
+		t.Fatalf("OIDC 登录不应附带本地密码条件: %v", query)
 	}
-	if strings.Contains(strings.ToLower(scenario.queries[0]), "password_hash") {
-		t.Fatalf("OIDC 登录不应附带本地密码条件: %v", scenario.queries[0])
+}
+
+// sessionAccountLockQuery 提取人员锁之后实际执行的账号锁定查询。
+// 参数：t为测试上下文，scenario为收集了真实SQL的凭据夹具。
+// 返回值：账号查询；缺失或人员未先锁定时终止测试。
+func sessionAccountLockQuery(t *testing.T, scenario *staleCredentialScenario) string {
+	t.Helper()
+	if len(scenario.queries) < 2 || !strings.Contains(scenario.queries[0], "FROM `iam_user`") {
+		t.Fatal("登录必须先锁人员再查询账号")
 	}
+	for _, query := range scenario.queries[1:] {
+		if strings.Contains(query, "FROM `iam_account`") {
+			return query
+		}
+	}
+	t.Fatal("登录必须执行账号锁定查询")
+	return ""
 }

@@ -1,11 +1,43 @@
 package infrastructure
 
 import (
+	"context"
+	"errors"
 	"time"
 
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
+
+// AccountIdentityForLock 在事务开始前读取不可变账号属主，仅用于确定人员锁键。
+// 参数：ctx为请求，db为非事务连接，tenant/account为账号范围；不替代业务校验。
+// 返回值：人员标识；账号不存在或无人员时为空，数据库错误原样返回。
+func AccountIdentityForLock(ctx context.Context, db *gorm.DB, tenant, account string) (string, error) {
+	var owner struct{ UserID *string }
+	err := db.WithContext(ctx).Table("iam_account").Select("user_id").
+		Where("tenant_id = ? AND id = ?", tenant, account).Take(&owner).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return "", nil
+	}
+	if err != nil || owner.UserID == nil {
+		return "", err
+	}
+	return *owner.UserID, nil
+}
+
+// LockIdentityTx 在其他写锁及一致性读之前锁定人员，不提前固定事务快照。
+// 参数：tx为事务，tenant/identity为事务外解析的锁键；空人员表示无人员账号。
+// 返回值：无；人员不存在或数据库失败时返回错误，不代表已通过业务授权。
+func LockIdentityTx(tx *gorm.DB, tenant, identity string) error {
+	if identity == "" {
+		return nil
+	}
+	var user struct{ ID string }
+	err := tx.Table("iam_user").Select("id").
+		Where("tenant_id = ? AND id = ?", tenant, identity).
+		Clauses(clause.Locking{Strength: "UPDATE"}).Take(&user).Error
+	return err
+}
 
 // activeIdentity 在线复核IAM人员、租户、账号和锁定期限，不依赖Keycloak投影延迟。
 // 参数：tx为生命周期事务，tenant/identity为验签身份，now为平台时钟。
