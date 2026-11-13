@@ -44,11 +44,15 @@ func accessCandidateFromEvidence(evidence string) string {
 	return digest
 }
 
+// Snapshot 绑定当前模式的目标、内置组件目录和真实不可变镜像。
+// 参数：ctx 为上下文，operation 为已授权的应用及环境。
+// 返回值：返回配置摘要；目标、目录或镜像不可确认时返回错误。
 func (tracker *SubsystemAccessConfigurationTracker) Snapshot(ctx context.Context, operation application.SubsystemAccessOperation) (string, error) {
-	target, found, err := resolveSubsystemAccessTarget(ctx, tracker.catalog, operation)
+	capabilities, err := tracker.catalog.AvailableCapabilities(ctx)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("read subsystem capability catalog: %w", err)
 	}
+	target, found := subsystemAccessTarget(capabilities, operation)
 	if !found {
 		return "", application.ErrSubsystemAccessInvalidRequest
 	}
@@ -70,7 +74,11 @@ func (tracker *SubsystemAccessConfigurationTracker) Snapshot(ctx context.Context
 		entries := []string{target.ManifestChecksum, version}
 		seen := map[string]bool{}
 		for _, image := range images {
-			if image.ServiceID == "" || seen[image.ServiceID] || !image.Present || !isImmutableProductionImageReference(image.ImageDigest) {
+			immutable := isImmutableProductionImageReference(image.ImageDigest)
+			if strings.EqualFold(strings.TrimSpace(capabilities.Mode), "local") {
+				immutable = immutable || localRuntimeDigest.MatchString(image.ImageDigest)
+			}
+			if image.ServiceID == "" || seen[image.ServiceID] || !image.Present || !immutable {
 				return "", errors.New("configuration snapshot contains unavailable or invalid image")
 			}
 			seen[image.ServiceID] = true

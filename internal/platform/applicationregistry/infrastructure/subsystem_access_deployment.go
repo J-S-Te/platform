@@ -825,19 +825,16 @@ func (reader *SubsystemAccessDeploymentStateGORMReader) ReadSubsystemAccessDeplo
 	return context, nil
 }
 
-// resolveSubsystemAccessTarget 从清单解析目标；未命中返回 ok=false。
+// resolveSubsystemAccessTarget 从可信执行器读取并解析当前模式的精确目标。
+// 参数：ctx 为上下文，catalog 为能力来源，operation 为授权目标。
+// 返回值：返回目标及命中标记；能力读取失败返回错误。
 func resolveSubsystemAccessTarget(ctx context.Context, catalog SubsystemAccessCatalogSource, operation application.SubsystemAccessOperation) (application.SubsystemProvisioningTarget, bool, error) {
 	capabilities, err := catalog.AvailableCapabilities(ctx)
 	if err != nil {
 		return application.SubsystemProvisioningTarget{}, false, fmt.Errorf("read subsystem capability catalog: %w", err)
 	}
-	for _, target := range capabilities.Targets {
-		if strings.EqualFold(strings.TrimSpace(target.ApplicationCode), strings.TrimSpace(operation.ApplicationCode)) &&
-			strings.EqualFold(strings.TrimSpace(target.Environment), strings.TrimSpace(operation.EnvironmentCode)) {
-			return target, true, nil
-		}
-	}
-	return application.SubsystemProvisioningTarget{}, false, nil
+	target, found := subsystemAccessTarget(capabilities, operation)
+	return target, found, nil
 }
 
 // FinalizeSubsystemAccess 完成收口（RESULT 阶段）：把"初始管理员已授权"落到部署状态。

@@ -115,19 +115,11 @@ func (adapter *SubsystemAccessOnboardingAdapter) onboardingInput(operation appli
 	}
 }
 
-// resolveTarget 从清单解析目标；未命中返回 ok=false（调用方据此判定"范围外"，不是错误）。
+// resolveTarget 与配置指纹和部署阶段共用同一目标解析规则。
+// 参数：ctx 为上下文，operation 为当前授权目标。
+// 返回值：返回目标及命中标记；能力读取失败返回错误。
 func (adapter *SubsystemAccessOnboardingAdapter) resolveTarget(ctx context.Context, operation application.SubsystemAccessOperation) (application.SubsystemProvisioningTarget, bool, error) {
-	capabilities, err := adapter.catalog.AvailableCapabilities(ctx)
-	if err != nil {
-		return application.SubsystemProvisioningTarget{}, false, fmt.Errorf("read subsystem capability catalog: %w", err)
-	}
-	for _, target := range capabilities.Targets {
-		if strings.EqualFold(strings.TrimSpace(target.ApplicationCode), strings.TrimSpace(operation.ApplicationCode)) &&
-			strings.EqualFold(strings.TrimSpace(target.Environment), strings.TrimSpace(operation.EnvironmentCode)) {
-			return target, true, nil
-		}
-	}
-	return application.SubsystemProvisioningTarget{}, false, nil
+	return resolveSubsystemAccessTarget(ctx, adapter.catalog, operation)
 }
 
 func optionalAccessString(value string) *string {

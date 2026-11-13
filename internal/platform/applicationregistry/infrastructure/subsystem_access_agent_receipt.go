@@ -189,11 +189,11 @@ func validateAccessReceipt(input application.SubsystemProvisioningInput) error {
 	return err
 }
 
-// ReadAccessDeploymentCompletion 用途：读取本地受控目标的部署完成回执。
+// ReadAccessDeploymentCompletion 用途：读取本机受支持环境的受控部署完成回执。
 // 参数：ctx 为上下文，receipt 为当前任务绑定。
 // 返回值：返回匹配结果；目标不在本地白名单时返回错误。
 func (p *LocalDockerSubsystemProvisioner) ReadAccessDeploymentCompletion(ctx context.Context, receipt application.SubsystemAccessDeploymentReceipt) (bool, error) {
-	if !p.config.Enabled || receipt.Environment != "dev" || !subsystemDirectoryCodePattern.MatchString(receipt.ApplicationCode) {
+	if !p.config.Enabled || !validLocalRuntimeEnvironment(receipt.Environment) || !subsystemDirectoryCodePattern.MatchString(receipt.ApplicationCode) {
 		return false, provisioningError("local receipt target is unavailable")
 	}
 	if !isIntegratedSubsystem(receipt.ApplicationCode) && len(localLicenseServices[receipt.ApplicationCode]) == 0 {
