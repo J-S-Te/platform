@@ -498,6 +498,9 @@ func NewAPI(cfg config.Config) (*API, error) {
 		_ = logFile.Close()
 		return nil, err
 	}
+	// authorization-context 是页面加载期间每个子系统都会重复请求的热点；2 秒进程内缓存
+	// 只吸收同一用户短时间内的并发突发，撤销最多延迟 2 秒，失败不缓存。
+	cachedAuthorizationContextResolver := applicationaccess.NewCachingAuthorizationContextResolver(oidcAuthorizationResolver, 2*time.Second)
 	oidcIssuer, err := oidctokenissuer.New(
 		oidcTokenManager, ulid.Generator{}, oidcAuthorizationResolver,
 	)
@@ -556,7 +559,7 @@ func NewAPI(cfg config.Config) (*API, error) {
 		AccessTokenSubjectResolver:     oidcAccessTokenSubjects,
 		ExternalAuthorizationVerifier:  externalAuthorizationVerifier,
 		AuthorizationResolver:          oidcAuthorizationResolver,
-		AuthorizationContextResolver:   oidcAuthorizationResolver,
+		AuthorizationContextResolver:   cachedAuthorizationContextResolver,
 		CustomerBindingResolver:        customerBindingResolverAdapter{service: externalIdentityService},
 		EmitCustomerRef:                cfg.Auth.AuthzContextCustomerRefEnabled,
 		PersonnelDirectoryResolver:     oidcPersonnelDirectory,
