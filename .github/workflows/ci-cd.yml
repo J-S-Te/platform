@@ -87,7 +87,7 @@ jobs:
           set -euo pipefail
           docker exec '${{ job.services.logout-mysql.id }}' mysql -uroot -e \
             "CREATE DATABASE platform_oidc_test_idle CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
-          go test ./internal/platform/oidc/infrastructure -run '^TestResolveSessionSubject(Idle|CentralIdle)PolicyMySQL$' -count=1 -v
+          go test ./internal/platform/oidc/infrastructure -run '^Test(ResolveSessionSubject(Idle|CentralIdle)Policy|CurrentClientCredentialPriority)MySQL$' -count=1 -v
       - name: Verify owner directory Chinese search on isolated MySQL
         env:
           PLATFORM_OWNER_DIRECTORY_TEST_DSN: root@tcp(127.0.0.1:${{ job.services.logout-mysql.ports[3306] }})/owner_directory_test?parseTime=true&charset=utf8mb4&collation=utf8mb4_0900_ai_ci
