@@ -574,20 +574,19 @@ func (repository *GORMRepository) ListAccounts(ctx context.Context, tenantID str
 	return application.PageResult[domain.Account]{Items: items, Page: query.Page, PageSize: query.PageSize, Total: total}, nil
 }
 
-// UpdateAccount 更新账号并在失效时同步撤销中央周期。
-//
-//	UpdateAccount 变更账号状态并在同一事务内使其会话失效。
-//	旧会话仍在有效期内时，被停用账号绝不能靠简单重新启用恢复访问。行锁使状态转移与
-//	会话吊销原子化：任一写入失败，两者都不生效。
-//
-// 参数：ctx为调用上下文与取消边界。
-//
-//	input为经过调用方边界校验的业务输入。
-//
-// 返回值：与该调用匹配的核验或持久化结果；失败保留原有错误语义。
+// UpdateAccount 按统一人员锁顺序更新账号，失效时在同一事务撤销会话。
+// 参数：ctx为请求与取消边界，input为已校验的租户、账号、版本和状态变更。
+// 返回值：更新后账号；范围、版本、状态或数据库错误会回滚整个事务。
 func (repository *GORMRepository) UpdateAccount(ctx context.Context, input application.AccountUpdateInput) (domain.Account, error) {
+	identity, err := repository.accountIdentityForLock(ctx, input.TenantID, input.AccountID)
+	if err != nil {
+		return domain.Account{}, err
+	}
 	ownerClause, ownerArgs := accountOwnerVisibilityFilter()
-	err := repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
+	err = repository.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
+		if err := sessionstore.LockIdentityTx(transaction, input.TenantID, identity); err != nil {
+			return err
+		}
 		var existing accountModel
 		result := transaction.Clauses(clause.Locking{Strength: "UPDATE"}).
 			Where("tenant_id = ? AND id = ? AND version = ?", input.TenantID, input.AccountID, input.Version).

@@ -291,7 +291,7 @@ func (s *Store) State(ctx context.Context, token string, now time.Time, interact
 		if err := tx.Table("sgov_binding").Where("token_hash = ?", digest(token)).Take(&binding).Error; err != nil {
 			return inactiveMissing(err)
 		}
-		anchor, p, err := activeAnchor(tx, binding.SessionID, now)
+		anchor, p, err := activeAnchor(tx, binding.SessionID, now, interact)
 		if err != nil {
 			return err
 		}
@@ -313,10 +313,10 @@ func (s *Store) State(ctx context.Context, token string, now time.Time, interact
 	return result, err
 }
 
-// activeAnchor 获取行锁后核验平台当前策略，防止活动与撤销并发复活。
-// 参数：tx为事务，id为中央锚点，now为时钟。
+// activeAnchor 按读写用途锁定中央周期后复核身份、策略与期限。
+// 参数：tx为事务，id为中央锚点，now为时钟，exclusive表示需要修改或关联周期。
 // 返回值：有效锚点和策略；缺失、失效或数据库失败时返回错误。
-func activeAnchor(tx *gorm.DB, id string, now time.Time) (domain.Session, domain.Policy, error) {
+func activeAnchor(tx *gorm.DB, id string, now time.Time, exclusive bool) (domain.Session, domain.Policy, error) {
 	var anchor domain.Session
 	// 人员共享锁先于中央行锁，防止与全局撤销交换顺序或在撤销后创建新周期。
 	if err := tx.Table("sgov_session").Where("id = ?", id).Take(&anchor).Error; err != nil {
@@ -325,7 +325,12 @@ func activeAnchor(tx *gorm.DB, id string, now time.Time) (domain.Session, domain
 	if err := activeIdentity(tx, anchor.TenantID, anchor.IdentityID, now); err != nil {
 		return anchor, domain.Policy{}, err
 	}
-	if err := tx.Table("sgov_session").Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ?", id).Take(&anchor).Error; err != nil {
+	strength := "SHARE"
+	if exclusive {
+		strength = "UPDATE"
+	}
+	// 普通鉴权并行共享读取；真实交互、绑定和撤销仍与这些读取互斥。
+	if err := tx.Table("sgov_session").Clauses(clause.Locking{Strength: strength}).Where("id = ?", id).Take(&anchor).Error; err != nil {
 		return anchor, domain.Policy{}, inactiveMissing(err)
 	}
 	p, err := policy(tx, anchor.TenantID)

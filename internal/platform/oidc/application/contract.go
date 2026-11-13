@@ -194,7 +194,7 @@ type NewRefreshToken struct {
 }
 
 // ConsumeAuthorizationCodeCommand 把授权码消费绑定到精确的 client、redirect URI，
-// 以及可选的 refresh token 创建。实现必须先按 CodeHash 加锁再转移状态。
+// 以及可选的 refresh token 创建。消费前必须按 CodeHash 加锁，再转移状态。
 type ConsumeAuthorizationCodeCommand struct {
 	CodeHash    [32]byte
 	ClientID    string
