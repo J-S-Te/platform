@@ -25,6 +25,7 @@ import (
 	notificationdomain "github.com/J-S-Te/Basic-Platform/internal/platform/notification/domain"
 	notificationinfrastructure "github.com/J-S-Te/Basic-Platform/internal/platform/notification/infrastructure"
 	notificationhttp "github.com/J-S-Te/Basic-Platform/internal/platform/notification/interfaces/http"
+	securityevent "github.com/J-S-Te/Basic-Platform/internal/platform/securityevent"
 	tenantclone "github.com/J-S-Te/Basic-Platform/internal/platform/tenantclone"
 	tenantclonehttp "github.com/J-S-Te/Basic-Platform/internal/platform/tenantclone/interfaces/http"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/config"
@@ -286,6 +287,11 @@ func buildOperationalModules(cfg config.Config, database *gorm.DB, logger *slog.
 		return httptransport.OperationalModules{}, err
 	}
 
+	securityEventHandler, err := securityevent.NewHandler(securityevent.NewStore(database), logger)
+	if err != nil {
+		return httptransport.OperationalModules{}, err
+	}
+
 	return httptransport.OperationalModules{
 		LoginTargets:        loginTargetHandler,
 		SubsystemOnboarding: subsystemHandler,
@@ -296,6 +302,7 @@ func buildOperationalModules(cfg config.Config, database *gorm.DB, logger *slog.
 		DeploymentStatusHandler:  subsystemHandler,
 		SubsystemServiceRoutes:   subsystemServiceRouteHandler,
 		Notifications:            notificationHandler,
+		SecurityEvents:           securityEventHandler,
 		AsyncJobs:                fileTaskHandler,
 		AccessApplier:            subsystemProvisioner,
 		PersonnelChanges:         personnelHandler,
