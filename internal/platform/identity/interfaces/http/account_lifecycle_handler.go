@@ -68,6 +68,8 @@ type passwordResetResponse struct {
 }
 
 // CreateLocalAccount 开通 HUMAN/LOCAL 账号及其初始密码凭据。
+// 参数：writer 输出响应，request 为当前认证的账号操作请求。
+// 返回值：无；输出原操作结果或安全校验原因，不回显密码与原始诊断。
 func (handler *AccountLifecycleHandler) CreateLocalAccount(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := authctx.PrincipalFromContext(request.Context())
 	if !ok {
@@ -76,8 +78,8 @@ func (handler *AccountLifecycleHandler) CreateLocalAccount(writer http.ResponseW
 	}
 
 	var payload localAccountCreateRequest
-	if !decodeManagementRequest(writer, request, &payload) {
-		handler.validation(writer, request)
+	if decodeErr := decodeManagementRequest(writer, request, &payload); decodeErr != nil {
+		httpresponse.WriteError(writer, request, http.StatusUnprocessableEntity, httperror.DecodeValidation(decodeErr))
 		return
 	}
 	if !handler.requireUnrestrictedManagementScope(writer, request, principal, "platform:account:create") {
@@ -99,6 +101,8 @@ func (handler *AccountLifecycleHandler) CreateLocalAccount(writer http.ResponseW
 }
 
 // InitializePassword 仅为尚无凭据的本地账号设置密码。
+// 参数：writer 输出响应，request 为当前认证的账号操作请求。
+// 返回值：无；输出原操作结果或安全校验原因，不回显密码与原始诊断。
 func (handler *AccountLifecycleHandler) InitializePassword(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := authctx.PrincipalFromContext(request.Context())
 	if !ok {
@@ -107,8 +111,8 @@ func (handler *AccountLifecycleHandler) InitializePassword(writer http.ResponseW
 	}
 
 	var payload passwordInitializeRequest
-	if !decodeManagementRequest(writer, request, &payload) {
-		handler.validation(writer, request)
+	if decodeErr := decodeManagementRequest(writer, request, &payload); decodeErr != nil {
+		httpresponse.WriteError(writer, request, http.StatusUnprocessableEntity, httperror.DecodeValidation(decodeErr))
 		return
 	}
 	if !handler.requireUnrestrictedManagementScope(writer, request, principal, "platform:account:password-initialize") {
@@ -126,6 +130,8 @@ func (handler *AccountLifecycleHandler) InitializePassword(writer http.ResponseW
 
 // ResetPassword 生成由管理员线下交付的高强度服务端随机密码。该值仅返回一次，
 // 不写入日志或审计记录。
+// 参数：writer 输出响应，request 为当前认证的账号操作请求。
+// 返回值：无；输出原操作结果或安全校验原因，不回显密码与原始诊断。
 func (handler *AccountLifecycleHandler) ResetPassword(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := authctx.PrincipalFromContext(request.Context())
 	if !ok {
@@ -134,8 +140,8 @@ func (handler *AccountLifecycleHandler) ResetPassword(writer http.ResponseWriter
 	}
 
 	var payload passwordResetRequest
-	if !decodeManagementRequest(writer, request, &payload) {
-		handler.validation(writer, request)
+	if decodeErr := decodeManagementRequest(writer, request, &payload); decodeErr != nil {
+		httpresponse.WriteError(writer, request, http.StatusUnprocessableEntity, httperror.DecodeValidation(decodeErr))
 		return
 	}
 	if !handler.requireUnrestrictedManagementScope(writer, request, principal, "platform:account:password-reset") {
@@ -157,6 +163,8 @@ func (handler *AccountLifecycleHandler) ResetPassword(writer http.ResponseWriter
 
 // ChangeOwnPassword 修改已认证账号的密码；吊销全部服务端会话后清除其浏览器
 // 会话 cookie。
+// 参数：writer 输出响应，request 为当前认证的账号操作请求。
+// 返回值：无；输出原操作结果或安全校验原因，不回显密码与原始诊断。
 func (handler *AccountLifecycleHandler) ChangeOwnPassword(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := authctx.PrincipalFromContext(request.Context())
 	if !ok {
@@ -165,8 +173,8 @@ func (handler *AccountLifecycleHandler) ChangeOwnPassword(writer http.ResponseWr
 	}
 
 	var payload passwordChangeRequest
-	if !decodeManagementRequest(writer, request, &payload) {
-		handler.validation(writer, request)
+	if decodeErr := decodeManagementRequest(writer, request, &payload); decodeErr != nil {
+		httpresponse.WriteError(writer, request, http.StatusUnprocessableEntity, httperror.DecodeValidation(decodeErr))
 		return
 	}
 	if err := handler.service.ChangeOwnPassword(request.Context(), application.PasswordChangeInput{

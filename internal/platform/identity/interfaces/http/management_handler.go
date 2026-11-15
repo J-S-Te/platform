@@ -341,6 +341,8 @@ func (handler *ManagementHandler) ListUsers(writer http.ResponseWriter, request 
 }
 
 // CreateUser 创建用户；租户取自会话主体，工号由服务端生成。
+// 参数：writer 输出响应，request 为当前已认证的管理请求。
+// 返回值：无；输出当前管理操作的业务回执或安全错误。
 func (handler *ManagementHandler) CreateUser(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := authctx.PrincipalFromContext(request.Context())
 	if !ok {
@@ -348,8 +350,8 @@ func (handler *ManagementHandler) CreateUser(writer http.ResponseWriter, request
 		return
 	}
 	var payload userCreateRequest
-	if !decodeManagementRequest(writer, request, &payload) {
-		handler.validation(writer, request)
+	if decodeErr := decodeManagementRequest(writer, request, &payload); decodeErr != nil {
+		handler.validation(writer, request, decodeErr)
 		return
 	}
 	status := domain.StatusActive
@@ -371,6 +373,8 @@ func (handler *ManagementHandler) CreateUser(writer http.ResponseWriter, request
 // 员工入职会在一个应用事务内创建用户、平台基线角色以及可选账号和首个任职。HTTP 层
 // 根据请求实际包含的子资源追加检查账号、任职权限，避免只有用户创建权限的操作者借聚合
 // 接口间接创建账号或任职；独立资源接口仅用于维护和例外流程。
+// 参数：writer 输出响应，request 为当前已认证的管理请求。
+// 返回值：无；输出当前管理操作的业务回执或安全错误。
 func (handler *ManagementHandler) CreateEmployee(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := authctx.PrincipalFromContext(request.Context())
 	if !ok {
@@ -378,8 +382,8 @@ func (handler *ManagementHandler) CreateEmployee(writer http.ResponseWriter, req
 		return
 	}
 	var payload employeeCreateRequest
-	if !decodeManagementRequest(writer, request, &payload) {
-		handler.validation(writer, request)
+	if decodeErr := decodeManagementRequest(writer, request, &payload); decodeErr != nil {
+		handler.validation(writer, request, decodeErr)
 		return
 	}
 	if payload.Account != nil && !principalHasPermission(principal, "platform:account:create") {
@@ -456,6 +460,8 @@ func principalHasPermission(principal authctx.Principal, expected string) bool {
 
 // 批量导入最多一次提交一百名普通用户并保持整批原子性。应用角色是额外授权动作，只有
 // 请求实际携带角色时才要求角色绑定更新权限；工号和平台基线角色仍由应用服务强制生成。
+// 参数：writer 输出响应，request 为当前已认证的管理请求。
+// 返回值：无；输出当前管理操作的业务回执或安全错误。
 func (handler *ManagementHandler) CreateUsersBatch(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := authctx.PrincipalFromContext(request.Context())
 	if !ok {
@@ -463,8 +469,8 @@ func (handler *ManagementHandler) CreateUsersBatch(writer http.ResponseWriter, r
 		return
 	}
 	var payload userBatchCreateRequest
-	if !decodeManagementRequest(writer, request, &payload) {
-		handler.validation(writer, request)
+	if decodeErr := decodeManagementRequest(writer, request, &payload); decodeErr != nil {
+		handler.validation(writer, request, decodeErr)
 		return
 	}
 	items := make([]application.UserCreateInput, 0, len(payload.Items))
@@ -507,6 +513,8 @@ func (handler *ManagementHandler) CreateUsersBatch(writer http.ResponseWriter, r
 // CreateEmployeesBatch 先在租户内解析组织与岗位名称，再把完整员工批次
 // 委托给原子的应用服务。逐行预校验一次性收集整批问题（见下方 422 的 details.issues），
 // 只要存在任一行问题就整批拒绝，绝不产生部分写入。
+// 参数：writer 输出响应，request 为当前已认证的管理请求。
+// 返回值：无；输出当前管理操作的业务回执或安全错误。
 func (handler *ManagementHandler) CreateEmployeesBatch(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := authctx.PrincipalFromContext(request.Context())
 	if !ok {
@@ -550,8 +558,8 @@ func (handler *ManagementHandler) CreateEmployeesBatch(writer http.ResponseWrite
 			handler.validation(writer, request)
 			return
 		}
-	} else if !decodeManagementRequest(writer, request, &payload) {
-		handler.validation(writer, request)
+	} else if decodeErr := decodeManagementRequest(writer, request, &payload); decodeErr != nil {
+		handler.validation(writer, request, decodeErr)
 		return
 	}
 	items := make([]application.EmployeeCreateInput, 0, len(payload.Items))
@@ -788,6 +796,8 @@ func mobileUpdateRequested(mobile *string) bool {
 
 // UpdateUser 更新用户基础信息与有效期；手机号仅在提交非空白值时才被视为修改，
 // 乐观锁 Version 不匹配时失败。受限管理范围下必须在任何写入之前完成目标范围核验。
+// 参数：writer 输出响应，request 为当前已认证的管理请求。
+// 返回值：无；输出当前管理操作的业务回执或安全错误。
 func (handler *ManagementHandler) UpdateUser(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := authctx.PrincipalFromContext(request.Context())
 	if !ok {
@@ -795,8 +805,8 @@ func (handler *ManagementHandler) UpdateUser(writer http.ResponseWriter, request
 		return
 	}
 	var payload userRequest
-	if !decodeManagementRequest(writer, request, &payload) {
-		handler.validation(writer, request)
+	if decodeErr := decodeManagementRequest(writer, request, &payload); decodeErr != nil {
+		handler.validation(writer, request, decodeErr)
 		return
 	}
 	scope, ok := handler.requireManagementScope(writer, request, principal, "platform:user:update")
@@ -817,6 +827,8 @@ func (handler *ManagementHandler) UpdateUser(writer http.ResponseWriter, request
 
 // DeleteUser 逻辑删除用户并停用其关联的全部登录路径。受限管理范围下必须在任何写入之前
 // 完成目标范围核验，绝不能先写后查。
+// 参数：writer 输出响应，request 为当前已认证的管理请求。
+// 返回值：无；输出当前管理操作的业务回执或安全错误。
 func (handler *ManagementHandler) DeleteUser(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := authctx.PrincipalFromContext(request.Context())
 	if !ok {
@@ -824,8 +836,8 @@ func (handler *ManagementHandler) DeleteUser(writer http.ResponseWriter, request
 		return
 	}
 	var payload userDeleteRequest
-	if !decodeManagementRequest(writer, request, &payload) {
-		handler.validation(writer, request)
+	if decodeErr := decodeManagementRequest(writer, request, &payload); decodeErr != nil {
+		handler.validation(writer, request, decodeErr)
 		return
 	}
 	scope, ok := handler.requireManagementScope(writer, request, principal, "platform:user:delete")
@@ -876,6 +888,8 @@ func (handler *ManagementHandler) ListAccounts(writer http.ResponseWriter, reque
 
 // UpdateAccount 更新账号状态与有效期；乐观锁 Version 不匹配时失败。受限管理范围下账号
 // 的组织归属经其属主用户的有效任职判定，且必须在写入之前完成。
+// 参数：writer 输出响应，request 为当前已认证的管理请求。
+// 返回值：无；输出当前管理操作的业务回执或安全错误。
 func (handler *ManagementHandler) UpdateAccount(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := authctx.PrincipalFromContext(request.Context())
 	if !ok {
@@ -883,8 +897,8 @@ func (handler *ManagementHandler) UpdateAccount(writer http.ResponseWriter, requ
 		return
 	}
 	var payload accountUpdateRequest
-	if !decodeManagementRequest(writer, request, &payload) {
-		handler.validation(writer, request)
+	if decodeErr := decodeManagementRequest(writer, request, &payload); decodeErr != nil {
+		handler.validation(writer, request, decodeErr)
 		return
 	}
 	scope, ok := handler.requireManagementScope(writer, request, principal, "platform:account:update")
@@ -934,6 +948,8 @@ func (handler *ManagementHandler) ListOrgUnits(writer http.ResponseWriter, reque
 
 // CreateOrgUnit 创建组织单元；创建根节点要求不受限范围，指定父节点时校验
 // 操作者对父节点拥有写权限。
+// 参数：writer 输出响应，request 为当前已认证的管理请求。
+// 返回值：无；输出当前管理操作的业务回执或安全错误。
 func (handler *ManagementHandler) CreateOrgUnit(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := authctx.PrincipalFromContext(request.Context())
 	if !ok {
@@ -941,8 +957,8 @@ func (handler *ManagementHandler) CreateOrgUnit(writer http.ResponseWriter, requ
 		return
 	}
 	var payload orgUnitCreateRequest
-	if !decodeManagementRequest(writer, request, &payload) {
-		handler.validation(writer, request)
+	if decodeErr := decodeManagementRequest(writer, request, &payload); decodeErr != nil {
+		handler.validation(writer, request, decodeErr)
 		return
 	}
 	scope, ok := handler.requireManagementScope(writer, request, principal, "platform:organization:create")
@@ -971,6 +987,8 @@ func (handler *ManagementHandler) CreateOrgUnit(writer http.ResponseWriter, requ
 
 // UpdateOrgUnit 更新组织单元；目标节点与移动后的父节点都必须在操作者的
 // 数据管理范围内，且受限范围不允许把父节点清空。
+// 参数：writer 输出响应，request 为当前已认证的管理请求。
+// 返回值：无；输出当前管理操作的业务回执或安全错误。
 func (handler *ManagementHandler) UpdateOrgUnit(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := authctx.PrincipalFromContext(request.Context())
 	if !ok {
@@ -978,8 +996,8 @@ func (handler *ManagementHandler) UpdateOrgUnit(writer http.ResponseWriter, requ
 		return
 	}
 	var payload orgUnitUpdateRequest
-	if !decodeManagementRequest(writer, request, &payload) {
-		handler.validation(writer, request)
+	if decodeErr := decodeManagementRequest(writer, request, &payload); decodeErr != nil {
+		handler.validation(writer, request, decodeErr)
 		return
 	}
 	scope, ok := handler.requireManagementScope(writer, request, principal, "platform:organization:update")
@@ -1003,6 +1021,8 @@ func (handler *ManagementHandler) UpdateOrgUnit(writer http.ResponseWriter, requ
 }
 
 // DeleteOrgUnit 逻辑删除组织单元，并同步停用其下岗位与任职关系。
+// 参数：writer 输出响应，request 为当前已认证的管理请求。
+// 返回值：无；输出当前管理操作的业务回执或安全错误。
 func (handler *ManagementHandler) DeleteOrgUnit(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := authctx.PrincipalFromContext(request.Context())
 	if !ok {
@@ -1010,8 +1030,8 @@ func (handler *ManagementHandler) DeleteOrgUnit(writer http.ResponseWriter, requ
 		return
 	}
 	var payload orgUnitDeleteRequest
-	if !decodeManagementRequest(writer, request, &payload) {
-		handler.validation(writer, request)
+	if decodeErr := decodeManagementRequest(writer, request, &payload); decodeErr != nil {
+		handler.validation(writer, request, decodeErr)
 		return
 	}
 	scope, ok := handler.requireManagementScope(writer, request, principal, "platform:organization:delete")
@@ -1063,6 +1083,8 @@ func (handler *ManagementHandler) ListPositions(writer http.ResponseWriter, requ
 
 // CreatePosition 在指定组织单元下创建岗位；目标组织单元必须在操作者的
 // 数据管理范围内。
+// 参数：writer 输出响应，request 为当前已认证的管理请求。
+// 返回值：无；输出当前管理操作的业务回执或安全错误。
 func (handler *ManagementHandler) CreatePosition(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := authctx.PrincipalFromContext(request.Context())
 	if !ok {
@@ -1070,8 +1092,8 @@ func (handler *ManagementHandler) CreatePosition(writer http.ResponseWriter, req
 		return
 	}
 	var payload positionCreateRequest
-	if !decodeManagementRequest(writer, request, &payload) {
-		handler.validation(writer, request)
+	if decodeErr := decodeManagementRequest(writer, request, &payload); decodeErr != nil {
+		handler.validation(writer, request, decodeErr)
 		return
 	}
 	scope, ok := handler.requireManagementScope(writer, request, principal, "platform:position:create")
@@ -1095,6 +1117,8 @@ func (handler *ManagementHandler) CreatePosition(writer http.ResponseWriter, req
 
 // DeletePosition 逻辑删除岗位并停用相关任职关系；目标岗位必须先通过
 // 数据管理范围的存在性校验。
+// 参数：writer 输出响应，request 为当前已认证的管理请求。
+// 返回值：无；输出当前管理操作的业务回执或安全错误。
 func (handler *ManagementHandler) DeletePosition(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := authctx.PrincipalFromContext(request.Context())
 	if !ok {
@@ -1102,8 +1126,8 @@ func (handler *ManagementHandler) DeletePosition(writer http.ResponseWriter, req
 		return
 	}
 	var payload positionDeleteRequest
-	if !decodeManagementRequest(writer, request, &payload) {
-		handler.validation(writer, request)
+	if decodeErr := decodeManagementRequest(writer, request, &payload); decodeErr != nil {
+		handler.validation(writer, request, decodeErr)
 		return
 	}
 	scope, ok := handler.requireManagementScope(writer, request, principal, "platform:position:delete")
@@ -1163,6 +1187,8 @@ func (handler *ManagementHandler) UpdateMembership(writer http.ResponseWriter, r
 	handler.writeMembership(writer, request, true)
 }
 
+// 参数：writer 输出响应，request 为当前已认证的管理请求。
+// 返回值：无；输出当前管理操作的业务回执或安全错误。
 func (handler *ManagementHandler) writeMembership(writer http.ResponseWriter, request *http.Request, update bool) {
 	principal, ok := authctx.PrincipalFromContext(request.Context())
 	if !ok {
@@ -1170,8 +1196,8 @@ func (handler *ManagementHandler) writeMembership(writer http.ResponseWriter, re
 		return
 	}
 	var payload membershipRequest
-	if !decodeManagementRequest(writer, request, &payload) {
-		handler.validation(writer, request)
+	if decodeErr := decodeManagementRequest(writer, request, &payload); decodeErr != nil {
+		handler.validation(writer, request, decodeErr)
 		return
 	}
 	permissionCode := "platform:membership:create"
@@ -1354,14 +1380,26 @@ func (handler *ManagementHandler) forbidden(writer http.ResponseWriter, request 
 	httpresponse.WriteError(writer, request, http.StatusForbidden, httperror.Forbidden)
 }
 
+// writeError 映射既有管理错误，只有明确标记的业务校验原因可进入响应。
+// 参数：writer/request 为当前响应与会话请求，err 为服务返回的错误链。
+// 返回值：无；输出原有状态码及安全的字段问题，不泄露内部异常。
 func (handler *ManagementHandler) writeError(writer http.ResponseWriter, request *http.Request, err error) {
 	switch {
 	case errors.Is(err, authzapplication.ErrForbidden):
 		httpresponse.WriteError(writer, request, http.StatusForbidden, httperror.Forbidden)
 	case errors.Is(err, application.ErrValidation):
-		handler.validation(writer, request)
+		issues := application.ValidationIssues(err)
+		if len(issues) == 0 {
+			handler.validation(writer, request)
+			return
+		}
+		httpresponse.WriteError(writer, request, http.StatusUnprocessableEntity,
+			httperror.New(httperror.Validation.Code, issues[0].Message,
+				map[string]any{"issues": issues}))
 	case errors.Is(err, application.ErrMembershipRequired):
-		httpresponse.WriteError(writer, request, http.StatusConflict, httperror.Conflict)
+		httpresponse.WriteError(writer, request, http.StatusConflict, httperror.New(
+			httperror.Conflict.Code, "创建人员时需要同时登记任职，请使用员工入职入口并选择组织和岗位。",
+			map[string]string{"reason_code": "USER_MEMBERSHIP_REQUIRED"}))
 	case errors.Is(err, application.ErrNotFound):
 		httpresponse.WriteError(writer, request, http.StatusNotFound, httperror.NotFound)
 	case errors.Is(err, application.ErrConflict):
@@ -1378,8 +1416,16 @@ func (handler *ManagementHandler) writeError(writer http.ResponseWriter, request
 		httpresponse.WriteError(writer, request, http.StatusInternalServerError, httperror.Internal)
 	}
 }
-func (handler *ManagementHandler) validation(w http.ResponseWriter, r *http.Request) {
-	httpresponse.WriteError(w, r, http.StatusUnprocessableEntity, httperror.Validation)
+
+// validation 输出校验响应，解码错误保留安全分类，普通业务哨兵保持兼容。
+// 参数：w/r 为响应与请求，causes 为可选的严格解码错误。
+// 返回值：无；不把错误字符串直接输出给客户端。
+func (handler *ManagementHandler) validation(w http.ResponseWriter, r *http.Request, causes ...error) {
+	response := httperror.Validation
+	if len(causes) > 0 {
+		response = httperror.DecodeValidation(causes[0])
+	}
+	httpresponse.WriteError(w, r, http.StatusUnprocessableEntity, response)
 }
 
 func (handler *ManagementHandler) batchValidation(w http.ResponseWriter, r *http.Request, issues ...employeeBatchIssue) {
@@ -1393,14 +1439,17 @@ func (handler *ManagementHandler) unauthenticated(w http.ResponseWriter, r *http
 	httpresponse.WriteError(w, r, http.StatusUnauthorized, httperror.Unauthenticated)
 }
 
-func decodeManagementRequest(writer http.ResponseWriter, request *http.Request, destination any) bool {
+// decodeManagementRequest 按原大小与未知字段限制解码一次管理请求。
+// 参数：writer 用于大小限制，request 为当前请求，destination 为既有请求结构。
+// 返回值：解码或额外内容错误；只有完整的单个 JSON 请求返回 nil。
+func decodeManagementRequest(writer http.ResponseWriter, request *http.Request, destination any) error {
 	defer request.Body.Close()
 	decoder := json.NewDecoder(http.MaxBytesReader(writer, request.Body, maxManagementRequestBytes))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(destination); err != nil {
-		return false
+		return err
 	}
-	return ensureSingleJSONValue(decoder) == nil
+	return ensureSingleJSONValue(decoder)
 }
 func parsePageRequest(request *http.Request) (application.PageRequest, error) {
 	query := request.URL.Query()
