@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -35,6 +36,7 @@ import (
 	externalidentityapplication "github.com/J-S-Te/Basic-Platform/internal/platform/externalidentity/application"
 	externalidentityinfrastructure "github.com/J-S-Te/Basic-Platform/internal/platform/externalidentity/infrastructure"
 	externalidentityhttp "github.com/J-S-Te/Basic-Platform/internal/platform/externalidentity/interfaces/http"
+	"github.com/J-S-Te/Basic-Platform/internal/platform/firstrun"
 	identityapplication "github.com/J-S-Te/Basic-Platform/internal/platform/identity/application"
 	"github.com/J-S-Te/Basic-Platform/internal/platform/identity/infrastructure"
 	identityhttp "github.com/J-S-Te/Basic-Platform/internal/platform/identity/interfaces/http"
@@ -446,6 +448,18 @@ func NewAPI(cfg config.Config) (*API, error) {
 	}
 
 	auditHandler, err := newAuditExportHandler(cfg, auditService, logger)
+	if err != nil {
+		_ = database.Close(db)
+		_ = logFile.Close()
+		return nil, err
+	}
+	firstRunEnabled, err := parseFirstRunEnabled()
+	if err != nil {
+		_ = database.Close(db)
+		_ = logFile.Close()
+		return nil, err
+	}
+	firstRunHandler, err := firstrun.NewHandler(firstrun.NewGORMStore(db), firstRunEnabled, logger)
 	if err != nil {
 		_ = database.Close(db)
 		_ = logFile.Close()
@@ -917,7 +931,7 @@ func NewAPI(cfg config.Config) (*API, error) {
 	api := &API{
 		OfflineDelivery: offlineDelivery,
 		Handler: httptransport.NewRouter(
-			cfg, logger, db, authHandler, bootstrapHandler, managementHandler, accountLifecycleHandler, authorizationHandler, applicationAccessHandler, positionGrantHandler, auditHandler, configurationHandler, settingsHandler, dictionaryHandler, loginSecurityHandler, applicationTokenHandler, applicationManagementHandler, oauthClientManagementHandler, applicationRegistryService, auditService, oidcHandler, operational,
+			cfg, logger, db, authHandler, bootstrapHandler, managementHandler, accountLifecycleHandler, authorizationHandler, applicationAccessHandler, positionGrantHandler, auditHandler, firstRunHandler, configurationHandler, settingsHandler, dictionaryHandler, loginSecurityHandler, applicationTokenHandler, applicationManagementHandler, oauthClientManagementHandler, applicationRegistryService, auditService, oidcHandler, operational,
 		),
 		Logger:       logger,
 		database:     db,
@@ -1141,4 +1155,17 @@ func parseSameSite(value string) (http.SameSite, error) {
 	default:
 		return http.SameSiteDefaultMode, fmt.Errorf("unsupported session cookie SameSite value %q", value)
 	}
+}
+
+// parseFirstRunEnabled 读取 first-run 的服务端开关；未配置默认开启，非法值拒绝启动。
+func parseFirstRunEnabled() (bool, error) {
+	raw := strings.TrimSpace(os.Getenv("FIRST_RUN_ENABLED"))
+	if raw == "" {
+		return true, nil
+	}
+	value, err := strconv.ParseBool(raw)
+	if err != nil {
+		return false, fmt.Errorf("FIRST_RUN_ENABLED: %w", err)
+	}
+	return value, nil
 }

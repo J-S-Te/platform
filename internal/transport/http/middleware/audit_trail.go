@@ -523,7 +523,7 @@ func loginIP(value net.IP) string {
 }
 
 func shouldRecordAuditTrail(method, route string) bool {
-	if method == http.MethodPost && (route == "/api/v1/audit/events" || route == "/api/v1/audit/events/batch") {
+	if method == http.MethodPost && (route == "/api/v1/audit/events" || route == "/api/v1/audit/events/batch" || route == "/api/v1/first-run/events") {
 		return false
 	}
 	// 安全审查 SEC-D4a：通用轨迹不再对任何写操作做成功抑制。此前用户应用授权、
