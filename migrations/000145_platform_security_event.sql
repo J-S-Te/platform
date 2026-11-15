@@ -1,0 +1,30 @@
+-- 全局安全事件：不绑定租户，专门记录认证失败等无法归属可信租户的安全事实。
+-- 与 audit_event 分开存储，避免匿名事件污染租户审计查询与哈希链。
+CREATE TABLE IF NOT EXISTS platform_security_event (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    event_id VARCHAR(128) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    tenant_id CHAR(26) CHARACTER SET ascii COLLATE ascii_bin NULL,
+    application_id CHAR(26) CHARACTER SET ascii COLLATE ascii_bin NULL,
+    application_code VARCHAR(64) NOT NULL,
+    environment_id CHAR(26) CHARACTER SET ascii COLLATE ascii_bin NULL,
+    environment_code VARCHAR(64) NOT NULL,
+    occurred_at DATETIME(3) NOT NULL,
+    received_at DATETIME(3) NOT NULL,
+    actor_type VARCHAR(32) NOT NULL,
+    actor_id VARCHAR(128) CHARACTER SET ascii COLLATE ascii_bin NULL,
+    actor_name VARCHAR(128) NULL,
+    action VARCHAR(128) NOT NULL,
+    method VARCHAR(16) NOT NULL,
+    path VARCHAR(512) NOT NULL,
+    client_ip VARCHAR(64) NULL,
+    user_agent VARCHAR(1000) NULL,
+    request_id VARCHAR(128) CHARACTER SET ascii COLLATE ascii_bin NULL,
+    result VARCHAR(32) NOT NULL,
+    reason_code VARCHAR(128) NULL,
+    risk_level VARCHAR(16) NOT NULL,
+    summary VARCHAR(500) NULL,
+    PRIMARY KEY (id),
+    UNIQUE KEY uq_security_event_app_event (application_id, event_id),
+    KEY idx_security_event_time (occurred_at, id),
+    KEY idx_security_event_app_time (application_code, occurred_at, id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

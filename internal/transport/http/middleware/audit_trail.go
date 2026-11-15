@@ -534,6 +534,9 @@ func shouldRecordAuditTrail(method, route string) bool {
 	if strings.HasPrefix(route, "/api/v1/audit/") {
 		return true
 	}
+	if method == http.MethodGet && isSensitivePlatformRead(route) {
+		return true
+	}
 	return method == http.MethodPost || method == http.MethodPut || method == http.MethodPatch || method == http.MethodDelete
 }
 
@@ -555,6 +558,17 @@ func isAuditExportDownloadRoute(route string) bool {
 // 合法下载变成 AUDIT_RESPONSE_TOO_LARGE 503。因此下载路由仍然产生审计事件（方法/路径/
 // 主体/状态码/结果），只是响应体按策略不采集（metadata.response_body=not_captured）。
 // 其余路由（含审计查询、票据签发）保持原扣留语义不变。
+var sensitivePlatformReadPrefixes = []string{"/api/v1/licenses/artifact", "/api/v1/licenses/request", "/api/v1/users/", "/api/v1/accounts/", "/api/v1/org-units/", "/api/v1/positions/", "/api/v1/memberships/", "/api/v1/authorization/effective-access", "/api/v1/applications/"}
+
+func isSensitivePlatformRead(route string) bool {
+	for _, prefix := range sensitivePlatformReadPrefixes {
+		if strings.HasPrefix(route, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 func shouldCaptureAuditResponseBody(route string) bool {
 	return !isAuditExportDownloadRoute(route)
 }
