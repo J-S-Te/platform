@@ -185,6 +185,9 @@ func (r *Repository) findClient(ctx context.Context, database *gorm.DB, conditio
 	return client, err
 }
 
+// withCapabilities 加载当前授权能力及有效凭据，新密钥优先且保留旧密钥重叠窗口。
+// 参数：ctx控制查询，database为当前连接，client为活动登记，now为有效期判定时刻。
+// 返回值：完整客户端能力；任何依赖查询失败均返回错误，不回退过期登记。
 func (r *Repository) withCapabilities(ctx context.Context, database *gorm.DB, client clientRow, now time.Time) (domain.Client, error) {
 	var redirects, grants, scopes []stringRow
 	if err := database.WithContext(ctx).Table("platform_oauth_redirect_uri").Select("redirect_uri AS value").Where("oauth_client_id = ?", client.ID).Find(&redirects).Error; err != nil {
@@ -207,6 +210,7 @@ func (r *Repository) withCapabilities(ctx context.Context, database *gorm.DB, cl
 	if err := database.WithContext(ctx).Table("platform_oauth_client_credential").
 		Select("secret_hash, valid_until").
 		Where("oauth_client_id = ? AND credential_type = ? AND status = ? AND revoked_at IS NULL AND valid_from <= ? AND (valid_until IS NULL OR valid_until > ?)", client.ID, "secret", activeStatus, now, now).
+		Order("valid_from DESC, id DESC").
 		Find(&credentials).Error; err != nil {
 		return domain.Client{}, err
 	}

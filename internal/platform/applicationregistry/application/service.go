@@ -163,17 +163,19 @@ func mapAuthenticationError(err error) error {
 	return err
 }
 
+// verifyAnySecret 匹配任一当前有效密钥后停止，避免历史重叠凭据重复消耗CPU。
+// 参数：credentials为仓储已过滤的当前有效哈希，secret为本次请求的密钥。
+// 返回值：至少一把密钥匹配时为true；空集合或全部不匹配时为false。
 func verifyAnySecret(credentials []domain.ClientCredential, secret string) bool {
-	matched := false
 	for _, credential := range credentials {
 		if len(credential.SecretHash) == 0 {
 			continue
 		}
 		if bcrypt.CompareHashAndPassword(credential.SecretHash, []byte(secret)) == nil {
-			matched = true
+			return true
 		}
 	}
-	return matched
+	return false
 }
 
 func allowedScopes(allowed map[string]struct{}, requested []string) ([]string, error) {

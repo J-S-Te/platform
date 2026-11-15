@@ -43,10 +43,9 @@ type credentialModel struct {
 
 type stringRow struct{ Value string }
 
-// FindForClientCredentials 按 client_id 加载用于 client_credentials 令牌签发的客户端及其
-// 有效凭据。客户端、所属应用与环境三者必须均为 ACTIVE；凭据必须为 secret 类型、未吊销且
-// 处于 valid_from/valid_until 有效窗口内。任何一环未命中都统一映射为
-// application.ErrUnauthenticated，不区分“不存在”与“已停用”，避免向令牌端点调用方泄露登记状态。
+// FindForClientCredentials 加载当前活动客户端和有效凭据，优先返回新密钥并保留轮换旧值。
+// 参数：ctx控制查询，clientID为登记标签，now为凭据有效期的判定时刻。
+// 返回值：活动登记及完整有效secret集合；不存在或停用统一拒绝，不披露失败环节。
 func (r *Repository) FindForClientCredentials(ctx context.Context, clientID string, now time.Time) (domain.OAuthClient, []domain.ClientCredential, error) {
 	client, err := r.findClient(ctx, "platform_oauth_client.client_id = ?", clientID)
 	if err != nil {
@@ -58,6 +57,7 @@ func (r *Repository) FindForClientCredentials(ctx context.Context, clientID stri
 		Table("platform_oauth_client_credential").
 		Select("secret_hash, valid_until").
 		Where("oauth_client_id = ? AND credential_type = ? AND status = ? AND revoked_at IS NULL AND valid_from <= ? AND (valid_until IS NULL OR valid_until > ?)", client.ID, "secret", "ACTIVE", now, now).
+		Order("valid_from DESC, id DESC").
 		Find(&credentials).Error; err != nil {
 		return domain.OAuthClient{}, nil, err
 	}
