@@ -4,7 +4,7 @@
   "database": {
     "current_min": 0,
     "migrate_to": 145,
-    "migration_set_sha256": "41f4f571621de39e8212ee50978561ffb3ff314d8a5d72311be32deddd5f3ede",
+    "migration_set_sha256": "6f4c461c32088743214d3892f27c74386018bbaea32b86a4b134e3209aa37ef6",
     "previous_program_after_migration": "unknown"
   },
   "recovery": {
