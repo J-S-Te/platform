@@ -123,6 +123,7 @@ func (h *Handler) ListNamespaces(w http.ResponseWriter, r *http.Request) {
 	}
 	httpresponse.WriteSuccess(w, r, http.StatusOK, "操作成功", pageResponse[namespaceResponse]{Items: values, Page: result.Page, PageSize: result.PageSize, Total: result.Total})
 }
+
 // CreateNamespace 为 ACTIVE 的 dev 环境创建配置命名空间，并登记创建资源供审计。
 func (h *Handler) CreateNamespace(w http.ResponseWriter, r *http.Request) {
 	principal, ok := h.principal(w, r)
@@ -142,6 +143,7 @@ func (h *Handler) CreateNamespace(w http.ResponseWriter, r *http.Request) {
 	middleware.MarkCreatedResource(r, result.ID)
 	httpresponse.WriteSuccess(w, r, http.StatusCreated, "配置命名空间已创建", namespaceToResponse(result))
 }
+
 // ListItems 分页返回当前租户的配置草稿项。
 func (h *Handler) ListItems(w http.ResponseWriter, r *http.Request) {
 	principal, ok := h.principal(w, r)
@@ -159,6 +161,7 @@ func (h *Handler) ListItems(w http.ResponseWriter, r *http.Request) {
 	}
 	httpresponse.WriteSuccess(w, r, http.StatusOK, "操作成功", pageResponse[itemResponse]{Items: values, Page: result.Page, PageSize: result.PageSize, Total: result.Total})
 }
+
 // CreateItem 创建配置草稿项并登记创建资源供审计。
 func (h *Handler) CreateItem(w http.ResponseWriter, r *http.Request) {
 	principal, ok := h.principal(w, r)
@@ -178,6 +181,7 @@ func (h *Handler) CreateItem(w http.ResponseWriter, r *http.Request) {
 	middleware.MarkCreatedResource(r, result.ID)
 	httpresponse.WriteSuccess(w, r, http.StatusCreated, "配置项已创建", itemToResponse(result))
 }
+
 // UpdateItem 在乐观锁保护下更新配置草稿项。
 func (h *Handler) UpdateItem(w http.ResponseWriter, r *http.Request) {
 	principal, ok := h.principal(w, r)
@@ -195,6 +199,7 @@ func (h *Handler) UpdateItem(w http.ResponseWriter, r *http.Request) {
 	}
 	httpresponse.WriteSuccess(w, r, http.StatusOK, "配置项已更新", itemToResponse(result))
 }
+
 // CreateRelease 依据显式版本列表发布不可变配置快照，并登记发布记录供审计。
 func (h *Handler) CreateRelease(w http.ResponseWriter, r *http.Request) {
 	principal, ok := h.principal(w, r)
@@ -218,6 +223,7 @@ func (h *Handler) CreateRelease(w http.ResponseWriter, r *http.Request) {
 	middleware.MarkCreatedResource(r, result.ID)
 	httpresponse.WriteSuccess(w, r, http.StatusAccepted, "配置版本已发布", releaseToResponse(result))
 }
+
 // GetRelease 返回租户内指定发布记录。
 func (h *Handler) GetRelease(w http.ResponseWriter, r *http.Request) {
 	principal, ok := h.principal(w, r)
@@ -231,6 +237,7 @@ func (h *Handler) GetRelease(w http.ResponseWriter, r *http.Request) {
 	}
 	httpresponse.WriteSuccess(w, r, http.StatusOK, "配置发布记录查询成功", releaseToResponse(result))
 }
+
 // GetPublished 返回指定应用命名空间当前发布的配置值。
 func (h *Handler) GetPublished(w http.ResponseWriter, r *http.Request) {
 	// 应用编码和命名空间只是查找条件；真正的租户边界仍来自认证主体。
@@ -267,16 +274,20 @@ func (h *Handler) writeError(w http.ResponseWriter, r *http.Request, err error) 
 		httpresponse.WriteError(w, r, http.StatusInternalServerError, httperror.Internal)
 	}
 }
+
+// decode 严格解码当前管理请求，并公开格式错误的安全分类。
+// 参数：响应对象用于限制请求大小，请求与目标结构沿用当前接口约定。
+// 返回值：完整合法请求返回 true；失败写入既有校验响应并返回 false。
 func decode(w http.ResponseWriter, r *http.Request, target any) bool {
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBytes)
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(target); err != nil {
-		httpresponse.WriteError(w, r, http.StatusUnprocessableEntity, httperror.Validation)
+		httpresponse.WriteError(w, r, http.StatusUnprocessableEntity, httperror.DecodeValidation(err))
 		return false
 	}
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		httpresponse.WriteError(w, r, http.StatusUnprocessableEntity, httperror.Validation)
+		httpresponse.WriteError(w, r, http.StatusUnprocessableEntity, httperror.DecodeValidation(err))
 		return false
 	}
 	return true

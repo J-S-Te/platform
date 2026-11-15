@@ -457,16 +457,19 @@ func (handler *ManagementHandler) writeError(writer http.ResponseWriter, request
 	}
 }
 
+// decodeApplicationManagementJSON 严格解码当前管理请求，并公开格式错误的安全分类。
+// 参数：响应对象用于限制请求大小，请求与目标结构沿用当前接口约定。
+// 返回值：完整合法请求返回 true；失败写入既有校验响应并返回 false。
 func decodeApplicationManagementJSON(writer http.ResponseWriter, request *http.Request, destination any) bool {
 	request.Body = http.MaxBytesReader(writer, request.Body, maxApplicationManagementRequestBytes)
 	decoder := json.NewDecoder(request.Body)
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(destination); err != nil {
-		httpresponse.WriteError(writer, request, http.StatusUnprocessableEntity, httperror.Validation)
+		httpresponse.WriteError(writer, request, http.StatusUnprocessableEntity, httperror.DecodeValidation(err))
 		return false
 	}
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		httpresponse.WriteError(writer, request, http.StatusUnprocessableEntity, httperror.Validation)
+		httpresponse.WriteError(writer, request, http.StatusUnprocessableEntity, httperror.DecodeValidation(err))
 		return false
 	}
 	return true

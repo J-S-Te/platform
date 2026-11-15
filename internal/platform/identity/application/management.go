@@ -645,6 +645,9 @@ func (service *ManagementService) prepareUserWrite(input UserCreateInput, id str
 	return UserWrite{UserCreateInput: input, ID: id, MobileCiphertext: ciphertext, MobileHash: digest}, nil
 }
 
+// protectMobile 复用既有手机号校验与加密，非法格式提供可定位的静态提示。
+// 参数：mobile 为可选手机号，空值保持原有不存储行为。
+// 返回值：密文及摘要；校验错误不包含原值，加密失败保留内部错误链。
 func (service *ManagementService) protectMobile(mobile *string) ([]byte, []byte, error) {
 	// 密文用于授权后的展示恢复，键控摘要用于唯一性查询；数据库不保存可直接搜索的明文，
 	// 空手机号则两者都不写入，避免把“未填写”聚合成同一个唯一值。
@@ -653,7 +656,7 @@ func (service *ManagementService) protectMobile(mobile *string) ([]byte, []byte,
 	}
 	normalized, ok := normalizeMobile(*mobile)
 	if !ok {
-		return nil, nil, ErrValidation
+		return nil, nil, invalidField("mobile", "format", "手机号格式不正确，请检查后重新填写。")
 	}
 	ciphertext, err := service.mobiles.Encrypt(normalized)
 	if err != nil {
@@ -691,21 +694,30 @@ func normalizePageRequest(query PageRequest) PageRequest {
 	return query
 }
 
+// validateUserCreate 按既有规则校验人员创建资料并说明首个不符合项。
+// 参数：input 为创建资料，now 为当前校验时刻。
+// 返回值：安全字段错误；原有合法输入返回 nil。
 func validateUserCreate(input UserCreateInput, now time.Time) error {
-	if input.TenantID == "" || input.OperatorID == "" || !validName(input.DisplayName, 100) || !validStatus(input.Status) {
-		return ErrValidation
+	if input.TenantID == "" || input.OperatorID == "" {
+		return invalidField("tenant_id", "required", "当前人员会话信息不完整，请刷新页面后重新操作。")
+	}
+	if !validName(input.DisplayName, 100) {
+		return invalidField("display_name", "length", "请填写姓名，并将姓名长度控制在页面允许范围内。")
+	}
+	if !validStatus(input.Status) {
+		return invalidField("status", "oneof", "人员状态无效，请刷新后重新选择。")
 	}
 	if input.EmployeeNo != nil && len(strings.TrimSpace(*input.EmployeeNo)) > 64 {
-		return ErrValidation
+		return invalidField("employee_no", "max", "工号信息不符合系统要求，请刷新资料核对；仍失败时请联系管理员处理。")
 	}
 	if input.Email != nil && !validEmail(*input.Email) {
-		return ErrValidation
+		return invalidField("email", "email", "邮箱格式不正确，请检查后重新填写。")
 	}
 	if input.Mobile != nil && len(strings.TrimSpace(*input.Mobile)) > 32 {
-		return ErrValidation
+		return invalidField("mobile", "max", "手机号长度超过上限，请检查后重新填写。")
 	}
 	if input.ValidUntil != nil && !input.ValidUntil.After(now.UTC()) {
-		return ErrValidation
+		return invalidField("valid_until", "after", "有效期结束时间必须晚于当前时间，请重新选择。")
 	}
 	return nil
 }
@@ -726,42 +738,70 @@ func validOptionalPersonID(value string) bool {
 	return true
 }
 
+// validateUserUpdate 按原编辑规则校验资料和版本，区分用户输入与页面过期。
+// 参数：input 为当前人员编辑命令，now 为有效期校验时刻。
+// 返回值：首个安全字段问题；不新增可写字段或业务限制。
 func validateUserUpdate(input UserUpdateInput, now time.Time) error {
-	if input.TenantID == "" || input.OperatorID == "" || input.UserID == "" || input.Version == 0 || !validName(input.DisplayName, 100) {
-		return ErrValidation
+	if input.TenantID == "" || input.OperatorID == "" || input.UserID == "" {
+		return invalidField("tenant_id", "required", "当前人员会话或对象信息不完整，请刷新后重新操作。")
+	}
+	if input.Version == 0 {
+		return invalidField("version", "required", "人员资料版本缺失，请刷新资料后重新编辑。")
+	}
+	if !validName(input.DisplayName, 100) {
+		return invalidField("display_name", "length", "请填写姓名，并将姓名长度控制在页面允许范围内。")
 	}
 	if input.EmployeeNo != nil && len(strings.TrimSpace(*input.EmployeeNo)) > 64 {
-		return ErrValidation
+		return invalidField("employee_no", "max", "工号信息不符合系统要求，请刷新资料核对；仍失败时请联系管理员处理。")
 	}
 	if input.PMSPersonID != nil && !validOptionalPersonID(*input.PMSPersonID) {
-		return ErrValidation
+		return invalidField("pms_person_id", "format", "项目人员关联信息不正确，请重新选择人员。")
 	}
 	if input.Email != nil && !validEmail(*input.Email) {
-		return ErrValidation
+		return invalidField("email", "email", "邮箱格式不正确，请检查后重新填写。")
 	}
 	if input.Status != nil && !validStatus(*input.Status) {
-		return ErrValidation
+		return invalidField("status", "oneof", "人员状态无效，请刷新后重新选择。")
 	}
 	if input.UpdateMobile && input.Mobile != nil && len(strings.TrimSpace(*input.Mobile)) > 32 {
-		return ErrValidation
+		return invalidField("mobile", "max", "手机号长度超过上限，请检查后重新填写。")
 	}
 	if input.UpdateValidity && input.ValidUntil != nil && !input.ValidUntil.After(now.UTC()) {
-		return ErrValidation
+		return invalidField("valid_until", "after", "有效期结束时间必须晚于当前时间，请重新选择。")
 	}
 	return nil
 }
 
+// validateMembership 保留任职引用和日期规则，说明缺失字段及日期先后关系。
+// 参数：各标识与 kind 为任职信息，from/to 为可同时省略的任职日期。
+// 返回值：首个安全校验问题；合法长期或短期任职返回 nil。
 func validateMembership(tenantID, operatorID, userID, orgUnitID, positionID, kind string, from, to *time.Time) error {
-	if tenantID == "" || operatorID == "" || userID == "" || orgUnitID == "" || positionID == "" || (kind != domain.MembershipPrimary && kind != domain.MembershipSecondary) {
-		return ErrValidation
+	if tenantID == "" || operatorID == "" {
+		return invalidField("tenant_id", "required", "当前会话信息不完整，请刷新后重新操作。")
+	}
+	for _, required := range []struct{ field, value, message string }{
+		{"user_id", userID, "请选择任职人员。"},
+		{"org_unit_id", orgUnitID, "请选择任职组织。"},
+		{"position_id", positionID, "请选择任职岗位。"},
+	} {
+		if required.value == "" {
+			return invalidField(required.field, "required", required.message)
+		}
+	}
+	if kind != domain.MembershipPrimary && kind != domain.MembershipSecondary {
+		return invalidField("membership_type", "oneof", "请选择有效的任职类型。")
 	}
 	// 长期任职两个日期都省略；短期任职必须提供完整的闭区间日期范围，只接受单端点会让
 	// 有效期语义产生歧义。
 	if (from == nil) != (to == nil) {
-		return ErrValidation
+		field := "effective_to"
+		if from == nil {
+			field = "effective_from"
+		}
+		return invalidField(field, "required", "短期任职需要同时填写生效日期和失效日期，长期任职可都留空。")
 	}
 	if from != nil && from.After(*to) {
-		return ErrValidation
+		return invalidField("effective_to", "range", "任职失效日期不能早于生效日期，请检查起止日期。")
 	}
 	return nil
 }
