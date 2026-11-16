@@ -1,0 +1,76 @@
+name: log-cleanup
+
+on:
+  workflow_dispatch:
+    inputs:
+      keep_days:
+        description: '保留天数；早于该天数的容器/应用日志才会被截断'
+        required: false
+        default: '7'
+        type: string
+      min_mb:
+        description: '只处理大于该 MB 的日志文件'
+        required: false
+        default: '50'
+        type: string
+      dry_run:
+        description: '仅打印计划；取消勾选才真正截断'
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    environment: test
+    steps:
+      - uses: actions/checkout@v4
+      - name: Truncate old container and application logs
+        shell: bash
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+          DEPLOY_PATH: ${{ vars.DEPLOY_PATH }}
+          KEEP_DAYS: ${{ inputs.keep_days }}
+          MIN_MB: ${{ inputs.min_mb }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -Eeuo pipefail
+          : "${DEPLOY_HOST:?missing DEPLOY_HOST}"
+          : "${DEPLOY_USER:?missing DEPLOY_USER}"
+          : "${DEPLOY_SSH_KEY:?missing DEPLOY_SSH_KEY}"
+          : "${DEPLOY_KNOWN_HOSTS:?missing DEPLOY_KNOWN_HOSTS}"
+          DEPLOY_PORT="${DEPLOY_PORT:-22}"
+          DEPLOY_PATH="${DEPLOY_PATH:-/opt/unified-identity-platform}"
+          [[ "$KEEP_DAYS" =~ ^[0-9]+$ ]] || exit 1
+          [[ "$MIN_MB" =~ ^[0-9]+$ ]] || exit 1
+          install -m 700 -d "$HOME/.ssh"
+          printf '%s\n' "$DEPLOY_SSH_KEY" > "$HOME/.ssh/id_ed25519"
+          chmod 600 "$HOME/.ssh/id_ed25519"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          apply=""
+          [[ "$DRY_RUN" == "false" ]] && apply="--apply"
+          ssh -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" \
+            "KEEP_DAYS='$KEEP_DAYS' MIN_MB='$MIN_MB' APPLY='$apply' DEPLOY_PATH='$DEPLOY_PATH' bash -s" <<'REMOTE'
+          set -Eeuo pipefail
+          echo "== before =="; df -h /
+          echo "== container logs =="
+          mapfile -t files < <(find /var/lib/docker/containers -type f -name '*-json.log' -mtime +"$KEEP_DAYS" -size +"$MIN_MB"M -print)
+          printf '%s\n' "${files[@]:-}" | sed '/^$/d'
+          if [[ "$APPLY" == "--apply" ]]; then
+            for f in "${files[@]:-}"; do [[ -f "$f" ]] && sudo truncate -s 0 "$f"; done
+          fi
+          echo "== application logs =="
+          mapfile -t appfiles < <(find "$DEPLOY_PATH" -type f -name '*.log' -mtime +"$KEEP_DAYS" -size +"$MIN_MB"M -print 2>/dev/null)
+          printf '%s\n' "${appfiles[@]:-}" | sed '/^$/d'
+          if [[ "$APPLY" == "--apply" ]]; then
+            for f in "${appfiles[@]:-}"; do [[ -f "$f" ]] && truncate -s 0 "$f"; done
+          fi
+          echo "== after =="; df -h /
+          REMOTE
