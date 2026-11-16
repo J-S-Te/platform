@@ -54,7 +54,7 @@ CORE = {"keycloak-db", "keycloak", "platform-mysql", "platform-migrate", "platfo
 ASSET_DIRS = {"bin", "subsystems.d", "subsystem-templates", "mysql-init", "nginx", "monitoring", "tests"}
 ASSET_FILES = {"docker-compose.yml", ".env.example", ".release.env.example", ".gitignore", "ACCEPTANCE_CHECKLIST.md", "README.md",
                "OFFLINE_DEPLOYMENT.md", "OFFLINE_RUNBOOK.md", "DELIVERY_WORKFLOW.md", "DEPLOYMENT_COMPATIBILITY.md", "deployment-compatibility.json", "BACKUP_RECOVERY.md", "CONTAINER_TIMEZONE.md",
-               "license-installation.json", "license-evidence.json", "license-migration-evidence.json"}
+               "CLOCK_RECOVERY.md", "license-installation.json", "license-evidence.json", "license-migration-evidence.json"}
 APPROVAL_NAMES = {"runtime-license-"+app+"-prod.json" for app in PROFILES}
 RECOVERY_TOOLS = {"deployment-workflow.sh", "deployment-session.py", "delivery-runtime.sh", "delivery-runtime.py",
                   "delivery-inspect.py", "delivery-inspect-images.py", "delivery-inspect-v2.py", "delivery-files.py", "subsystem-runtime.py", "project-background.sh"}

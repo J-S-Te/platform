@@ -27,10 +27,28 @@ offline_frontend_build_input_paths() {
     frontend/index.html frontend/login.html frontend/vite.config.js
 }
 
+# 用途：枚举恢复工具与本地共享许可库的受控源码，排除私钥和运行数据。
+# 参数：无；从工作区根目录调用。
+# 返回值：以 NUL 分隔的源码、模块清单及操作说明路径。
+offline_clock_recovery_build_input_paths() {
+  local directory
+  for directory in commercial-license-tool/cmd/clock-recovery \
+    commercial-license-tool/internal/clockrecovery license-core; do
+    [[ ! -d "$directory" ]] || find "$directory" -type f \
+      \( -name '*.go' -o -name go.mod -o -name go.sum \) -print0
+  done
+  printf '%s\0' commercial-license-tool/go.mod commercial-license-tool/go.sum \
+    platform/deploy/production/CLOCK_RECOVERY.md
+}
+
+# 用途：按共享或完整发行范围枚举实际构建输入。
+# 参数：mode 为 shared 或 full。
+# 返回值：以 NUL 分隔的路径；不支持的范围返回非零。
 offline_build_input_paths() {
   local mode="$1" component
   offline_platform_build_input_paths
   offline_frontend_build_input_paths
+  offline_clock_recovery_build_input_paths
   case "$mode" in
     shared)
       find platform/deploy/production/bin platform/deploy/production/monitoring \

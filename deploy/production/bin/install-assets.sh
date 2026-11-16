@@ -20,11 +20,14 @@ validate_target() {
   [[ "$target" == /* && "$target" != / ]] || { echo '部署目录必须为非根目录的绝对路径' >&2; exit 2; }
 }
 
+# 用途：限制安装事务可备份、替换和恢复的顶层资产名称。
+# 参数：第一个参数为待核验的顶层名称。
+# 返回值：名称已登记返回零，否则返回非零。
 safe_top_name() {
   case "$1" in
     license-installation.json|license-migration-evidence.json|license-evidence.json|runtime-license-contract_management-prod.json|runtime-license-customer_and_opportunity-prod.json|runtime-license-customer_portal-prod.json|runtime-license-project_management-prod.json|runtime-license-settlement-prod.json|runtime-license-data_analysis-prod.json) return 0 ;;
   esac
-  [[ "$1" =~ ^(runtime-approvals|license|bin|subsystems\.d|subsystem-templates|mysql-init|nginx|monitoring|tests|docker-compose\.yml|docker-compose\.yml\.dist|\.env\.example|\.release\.env\.example|\.gitignore|ACCEPTANCE_CHECKLIST\.md|README\.md|OFFLINE_DEPLOYMENT\.md|OFFLINE_RUNBOOK\.md|DEPLOYMENT_COMPATIBILITY\.md|deployment-compatibility\.json|DELIVERY_WORKFLOW\.md|BACKUP_RECOVERY\.md|CONTAINER_TIMEZONE\.md)$ ]]
+  [[ "$1" =~ ^(runtime-approvals|license|bin|subsystems\.d|subsystem-templates|mysql-init|nginx|monitoring|tests|docker-compose\.yml|docker-compose\.yml\.dist|\.env\.example|\.release\.env\.example|\.gitignore|ACCEPTANCE_CHECKLIST\.md|README\.md|OFFLINE_DEPLOYMENT\.md|OFFLINE_RUNBOOK\.md|DEPLOYMENT_COMPATIBILITY\.md|deployment-compatibility\.json|DELIVERY_WORKFLOW\.md|BACKUP_RECOVERY\.md|CONTAINER_TIMEZONE\.md|CLOCK_RECOVERY\.md)$ ]]
 }
 
 approval_name() {
@@ -187,7 +190,7 @@ printf '%s\n' "$listing" | awk '
     split($0, a, "/");
     if (a[1] == "license") { if ($0 != "license/" && $0 != "license/commercial-license.jws") exit 1; next; }
     if (a[1] ~ /^(license-installation\.json|license-migration-evidence\.json|license-evidence\.json|runtime-license-(contract_management|customer_and_opportunity|customer_portal|project_management|settlement|data_analysis)-prod\.json)$/) { if (length(a)>1) exit 1; next; }
-    if (a[1] !~ /^(bin|subsystems\.d|subsystem-templates|mysql-init|nginx|monitoring|tests|docker-compose\.yml|\.env\.example|\.release\.env\.example|\.gitignore|ACCEPTANCE_CHECKLIST\.md|README\.md|OFFLINE_DEPLOYMENT\.md|OFFLINE_RUNBOOK\.md|DEPLOYMENT_COMPATIBILITY\.md|deployment-compatibility\.json|DELIVERY_WORKFLOW\.md|BACKUP_RECOVERY\.md|CONTAINER_TIMEZONE\.md)$/) exit 1;
+    if (a[1] !~ /^(bin|subsystems\.d|subsystem-templates|mysql-init|nginx|monitoring|tests|docker-compose\.yml|\.env\.example|\.release\.env\.example|\.gitignore|ACCEPTANCE_CHECKLIST\.md|README\.md|OFFLINE_DEPLOYMENT\.md|OFFLINE_RUNBOOK\.md|DEPLOYMENT_COMPATIBILITY\.md|deployment-compatibility\.json|DELIVERY_WORKFLOW\.md|BACKUP_RECOVERY\.md|CONTAINER_TIMEZONE\.md|CLOCK_RECOVERY\.md)$/) exit 1;
   }' || { echo '资产包含非部署文件或不安全路径' >&2; exit 1; }
 tar -tvzf "$archive" | awk 'substr($1,1,1) != "-" && substr($1,1,1) != "d" {exit 1}' || { echo '资产禁止包含链接或特殊文件' >&2; exit 1; }
 
@@ -652,6 +655,9 @@ done
 chmod 700 "$target/runtime-approvals"
 find "$target/runtime-approvals" -type f -exec chmod 600 {} +
 chmod 750 "$target/bin/"*.sh
+if [[ -f "$target/bin/clock-recovery" ]]; then
+  chmod 750 "$target/bin/clock-recovery"
+fi
 if [[ "$control_plane_running" == true || "$pending_platform_upgrade" == true ]]; then
   write_control_plane_reload_marker
 fi
