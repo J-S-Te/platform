@@ -845,3 +845,17 @@ start/resume 会走发布、备份和迁移，不是仅 docker start。基础 ve
 由 `deploy.sh status` / `verify` 展示、不阻断发布。健康收敛改为「每服务窗口 `UIP_HEALTH_WAIT_SECONDS` + 总预算 `UIP_HEALTH_TOTAL_SECONDS`」，
 `RestartCount` 只判窗口内新增。Keycloak 探针改用管理端口 `/health/ready`，发布证明另做 OIDC 发现文档两级判定（master 硬性、租户 realm 404 仅告警）。
 Temporal 只在启用合同 / 项目 / CRM 任一消费子系统时启动，`verify` 门禁同步条件化。完整说明见 `OFFLINE_RUNBOOK.md` 9.6。
+
+
+### 持久协议换代与恢复
+
+结算归档租约和数析指标代次镜像声明 `com.basic-platform.runtime.epoch=1`。
+受控发布在改变 `.release.env` 前核对目标和原镜像代次；降代被拒绝。
+换代先完成已有备份，再停止旧 API/Worker 并核验已经退出，之后迁移和启动新写者。
+同代回滚、以及新写者尚未启动时的失败仍使用原恢复流程。
+
+新写者可能运行后发生跨代故障时，不自动恢复旧镜像或旧发布指针；保留候选、
+上一版本指针、备份和 `runtime/recovery-status.json`，优先修复后向前发布。
+需要旧版本时，须协调新增业务记录及网关外部绑定再执行既有受控恢复，不能仅还原
+数据库就假定外部上传/绑定已经撤销。数析流式快照对旧读者使用 `rows:null` 明确拒读，
+避免回滚后把完整非零事实显示为可用零值；新读者从已发布代次读取真实元数据。
