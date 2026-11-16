@@ -5,7 +5,7 @@ default: false
 application:
   code: data_analysis
   initial_admin_roles: [dashboard_admin]
-  allowed_service_bindings: [contract_dashboard_read, project_dashboard_read, contract_import_report_read, settlement_dashboard_read]
+  allowed_service_bindings: [contract_dashboard_read, project_dashboard_read, contract_import_report_read, settlement_dashboard_read, notification_ingest]
   name: 数据看板与统计分析系统
   description: 经营总览、合同项目分析、预警与指标看板
   environment: prod
@@ -52,6 +52,9 @@ runtime:
         PLATFORM_APPLICATION_CODE: data_analysis
         PLATFORM_ENVIRONMENT_CODE: prod
         PLATFORM_AUDIT_REQUIRED: "true"
+        PLATFORM_NOTIFICATION_URL: http://platform-api:8080/api/v1/notifications/events
+        PLATFORM_NOTIFICATION_TOKEN_URL: http://platform-api:8080/oauth2/token
+        PLATFORM_NOTIFICATION_SCOPE: notification.ingest
         # 审计清理已启用：保留 60 天（已批准，2026-11-07 决策）。删除对象是仅保存在本地的
         # 已投递审计证据，平台侧另有副本；保留期不得低于审计要求，变更需重新审批
         # （见对应子系统模板注释）。
@@ -94,6 +97,8 @@ runtime:
         PLATFORM_AUTHORIZATION_CONTEXT_URL: authorization_context_url
         PLATFORM_AUDIT_CLIENT_ID: service.audit_ingest.client_id
         PLATFORM_AUDIT_CLIENT_SECRET: service.audit_ingest.client_secret
+        PLATFORM_NOTIFICATION_CLIENT_ID: service.notification_ingest.client_id
+        PLATFORM_NOTIFICATION_CLIENT_SECRET: service.notification_ingest.client_secret
         CONTRACT_MACHINE_CLIENT_ID: service.contract_dashboard_read.client_id
         CONTRACT_MACHINE_CLIENT_SECRET: service.contract_dashboard_read.client_secret
         PROJECT_MACHINE_CLIENT_ID: service.project_dashboard_read.client_id

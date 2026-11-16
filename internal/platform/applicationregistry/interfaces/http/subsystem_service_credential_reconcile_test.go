@@ -291,6 +291,7 @@ func TestEnsureUpdateServiceCredentialsBackfillsSeparatedDashboardReaders(t *tes
 	want := map[string][]string{
 		"data_analysis-prod-contract-import-report-read": {"contract.import.report.read"},
 		"data_analysis-prod-audit-publisher":             {"audit.ingest"},
+		"data_analysis-prod-notification-publisher":      {"notification.ingest"},
 		"data_analysis-prod-contract-dashboard":          {"dashboard.contract.read"},
 		"data_analysis-prod-project-dashboard":           {"dashboard.project.read"},
 		"data_analysis-prod-settlement-dashboard":        {"dashboard.settlement.read"},
@@ -300,6 +301,7 @@ func TestEnsureUpdateServiceCredentialsBackfillsSeparatedDashboardReaders(t *tes
 	requireOnlyCredentialPurposes(t, credentials, map[string]string{
 		application.ServiceCredentialContractImportReportRead: "new-secret",
 		application.ServiceCredentialAuditIngest:              "new-secret",
+		application.ServiceCredentialNotificationIngest:       "new-secret",
 		application.ServiceCredentialContractDashboardRead:    "new-secret",
 		application.ServiceCredentialProjectDashboardRead:     "new-secret",
 		application.ServiceCredentialSettlementDashboardRead:  "new-secret",
