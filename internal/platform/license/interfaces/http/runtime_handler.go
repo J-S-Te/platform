@@ -29,12 +29,13 @@ type installationEvidenceSource interface {
 	CollectInstallationLicenseEvidence(context.Context) (evidence.Report, error)
 }
 type RuntimeHandler struct {
-	service     runtimeCoordinator
-	evidence    EvidenceSource
-	environment string
-	state       licenseStateReader
-	observer    RuntimeObserver
-	now         func() time.Time
+	service      runtimeCoordinator
+	evidence     EvidenceSource
+	environment  string
+	state        licenseStateReader
+	observer     RuntimeObserver
+	applications RuntimeApplicationLister
+	now          func() time.Time
 }
 
 func NewRuntimeHandler(service runtimeCoordinator) (*RuntimeHandler, error) {

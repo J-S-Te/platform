@@ -867,6 +867,13 @@ func NewAPI(cfg config.Config) (*API, error) {
 		operational.RuntimeLicenses.ConfigureEvidence(source, cfg.Audit.EnvironmentCode)
 	}
 	operational.RuntimeLicenses.ConfigureOverview(licenseService, cfg.Audit.EnvironmentCode)
+	runtimeApplicationRepository, err := applicationregistryinfrastructure.NewSubsystemOnboardingGORMRepository(db)
+	if err != nil {
+		_ = database.Close(db)
+		_ = logFile.Close()
+		return nil, err
+	}
+	operational.RuntimeLicenses.ConfigureRuntimeApplications(runtimeApplicationDirectory{repository: runtimeApplicationRepository})
 	if observer, ok := operational.AccessApplier.(licensehttp.RuntimeObserver); ok {
 		operational.RuntimeLicenses.ConfigureObserver(observer)
 	}

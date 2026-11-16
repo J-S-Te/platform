@@ -25,6 +25,7 @@ import (
 	oidchttp "github.com/J-S-Te/Basic-Platform/internal/platform/oidc/interfaces/http"
 	ownerdirectoryhttp "github.com/J-S-Te/Basic-Platform/internal/platform/ownerdirectory/interfaces/http"
 	securityhttp "github.com/J-S-Te/Basic-Platform/internal/platform/security/interfaces/http"
+	securityevent "github.com/J-S-Te/Basic-Platform/internal/platform/securityevent"
 	sessionhttp "github.com/J-S-Te/Basic-Platform/internal/platform/sessiongovernance/interfaces/http"
 	settingsapplication "github.com/J-S-Te/Basic-Platform/internal/platform/settings/application"
 	settingshttp "github.com/J-S-Te/Basic-Platform/internal/platform/settings/interfaces/http"
@@ -56,6 +57,7 @@ type OperationalModules struct {
 	DeploymentStatusHandler  applicationregistryhttp.DeploymentStatusHTTPHandler
 	SubsystemServiceRoutes   *applicationregistryhttp.SubsystemServiceRouteHandler
 	Notifications            *notificationhttp.Handler
+	SecurityEvents           *securityevent.Handler
 	AsyncJobs                *filetaskhttp.Handler
 	ExternalIdentity         *externalidentityhttp.Handler
 	OwnerDirectory           *ownerdirectoryhttp.Handler
@@ -270,12 +272,17 @@ func NewRouter(
 		// 所有管理 API 共享来源、写入内容类型、会话认证和可选审计链；具体权限由各路由
 		// 在注册点声明，便于审查“哪个接口需要什么能力”。
 		apiRouter.Use(middleware.RequireAllowedOriginForUnsafeMethods(allowedBrowserOrigins...), middleware.RequireSafeWriteContentType())
+		if operational.SecurityEvents != nil {
+			// 必须先于 Authentication：认证失败会 Abort，后续 AuditTrail 看不到 401。
+			apiRouter.Use(middleware.SecurityEventTrail(operational.SecurityEvents, cfg.Audit.ApplicationCode, cfg.Audit.EnvironmentCode, logger))
+		}
 		apiRouter.Use(middleware.Authentication(authHandler, authHandler.CookieName()))
 		if auditRecorder != nil {
 			apiRouter.Use(middleware.AuditTrail(auditRecorder, logger, middleware.AuditSource{ApplicationCode: cfg.Audit.ApplicationCode, EnvironmentCode: cfg.Audit.EnvironmentCode}))
 		}
 		if operational.RuntimeLicenses != nil {
 			apiRouter.GET("/licenses/installation-evidence", middleware.RequirePermission("platform:license:read"), adaptHandler(operational.RuntimeLicenses.InstallationEvidence))
+			apiRouter.GET("/licenses/enforcement", middleware.RequirePermission("platform:license:read"), adaptHandler(operational.RuntimeLicenses.Applications))
 			apiRouter.GET("/licenses/enforcement/:application/overview", middleware.RequirePermission("platform:license:read"), adaptHandler(operational.RuntimeLicenses.Overview))
 			apiRouter.GET("/licenses/enforcement/:application", middleware.RequirePermission("platform:license:read"), adaptHandler(operational.RuntimeLicenses.Status))
 			apiRouter.GET("/licenses/enforcement/:application/evidence", middleware.RequirePermission("platform:license:read"), adaptHandler(operational.RuntimeLicenses.Evidence))
@@ -538,6 +545,10 @@ func NewRouter(
 			apiRouter.GET("/audit/chain-verify", middleware.RequirePermission("platform:audit:view"), auditQueryRateLimit, adaptHandler(auditHandler.VerifyEventChain))
 			apiRouter.POST("/audit/events/:event_id/hash-check", middleware.RequirePermission("platform:audit:view"), auditQueryRateLimit, adaptHandler(auditHandler.VerifyEventHash))
 			apiRouter.GET("/audit/ingestion-health", middleware.RequirePermission("platform:audit:view"), auditQueryRateLimit, adaptHandler(auditHandler.IngestionHealth))
+			if operational.SecurityEvents != nil {
+				apiRouter.GET("/security-events", middleware.RequirePermission("platform:audit:view"), auditQueryRateLimit, adaptHandler(operational.SecurityEvents.List))
+				apiRouter.GET("/audit/coverage", middleware.RequirePermission("platform:audit:view"), auditQueryRateLimit, adaptHandler(operational.SecurityEvents.Coverage))
+			}
 			apiRouter.POST("/audit/export-jobs", middleware.RequirePermission("platform:audit:export"), adaptHandler(auditHandler.CreateExportJob))
 			apiRouter.GET("/audit/export-jobs/:job_id", middleware.RequirePermission("platform:audit:export"), adaptHandler(auditHandler.GetExportJob))
 			// 下载改为“先签发短时一次性票据，再凭票据兑换文件字节”：两个动作共用现有审计
@@ -662,7 +673,7 @@ func NewRouter(
 	}
 	// 集成侧审计上报使用独立的 bearer-token 边界：控制台用户角色不授予外部业务系统
 	// 提交审计事件的权限。
-	if applicationAuthenticator != nil && (auditHandler != nil || operational.Notifications != nil || operational.ExternalIdentity != nil || operational.OwnerDirectory != nil) {
+	if applicationAuthenticator != nil && (auditHandler != nil || operational.Notifications != nil || operational.ExternalIdentity != nil || operational.OwnerDirectory != nil || operational.SecurityEvents != nil) {
 		integrationRouter := router.Group("/api/v1")
 		integrationRouter.Use(middleware.ApplicationAuthentication(applicationAuthenticator))
 		if auditHandler != nil {
@@ -671,6 +682,10 @@ func NewRouter(
 			integrationRouter.GET("/audit/ingest/validate", middleware.RequireApplicationScope("audit.ingest"), adaptHandler(auditHandler.ValidateIngestion))
 			integrationRouter.POST("/audit/events", middleware.RequireApplicationScope("audit.ingest"), middleware.AuditIngestionCorrelation(), adaptHandler(auditHandler.Ingest))
 			integrationRouter.POST("/audit/events/batch", middleware.RequireApplicationScope("audit.ingest"), middleware.AuditIngestionCorrelation(), adaptHandler(auditHandler.IngestBatch))
+			if operational.SecurityEvents != nil {
+				integrationRouter.POST("/security-events", middleware.RequireApplicationScope("audit.ingest"), adaptHandler(operational.SecurityEvents.Ingest))
+				integrationRouter.POST("/audit/outbox-health", middleware.RequireApplicationScope("audit.ingest"), adaptHandler(operational.SecurityEvents.ReportOutboxHealth))
+			}
 		}
 		if operational.Notifications != nil {
 			// 外部系统只提交持久化事件信封；投递展开由 worker 异步完成，
