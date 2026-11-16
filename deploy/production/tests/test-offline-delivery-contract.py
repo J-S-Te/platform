@@ -168,9 +168,13 @@ class DeliveryContract(unittest.TestCase):
     # 参数：无。
     # 返回值：无；不复制密钥、状态、凭据或运行配置。
     def copy_recovery_build_sources(self):
-        for relative in ("commercial-license-tool", "commercial-license-tool/cmd/clock-recovery",
-                         "commercial-license-tool/internal/clockrecovery", "license-core",
-                         "license-core/runtime"):
+        source_directories = ("commercial-license-tool", "commercial-license-tool/cmd/clock-recovery",
+                              "commercial-license-tool/internal/clockrecovery", "license-core",
+                              "license-core/runtime")
+        # 单仓库 CI 没有厂商多仓库源码；相关定向用例会显式 skip，其余交付用例无需伪造源码。
+        if not all((REPO / relative).is_dir() for relative in source_directories):
+            return
+        for relative in source_directories:
             source = REPO / relative
             destination = self.workspace / relative
             destination.mkdir(parents=True, exist_ok=True)

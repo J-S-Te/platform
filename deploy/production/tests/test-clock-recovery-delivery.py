@@ -62,6 +62,10 @@ class ClockRecoveryDeliveryTests(unittest.TestCase):
     # 参数：无。
     # 返回值：无；工具漏打、动态链接或安装权限错误时失败。
     def test_assets_install_static_recovery_tool_without_host_go(self):
+        repo_root = Path(__file__).resolve().parents[4]
+        if (os.environ.get("CLOCK_RECOVERY_ALLOW_MISSING_SOURCE") == "1"
+                and not (repo_root / "commercial-license-tool/go.mod").is_file()):
+            self.skipTest("单仓库 CI 没有厂商 clock-recovery 源码；由厂商多仓库构建工作区覆盖")
         frozen = self.freeze_delivery_inputs()
         production = frozen.production
         self.write_tool("docker", '[ "$1 $2" = "buildx version" ]\n')

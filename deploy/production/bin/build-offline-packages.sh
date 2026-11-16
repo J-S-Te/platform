@@ -1063,11 +1063,20 @@ package_assets() (
       cp -p -- "$deploy_dir/$relative" "$destination"
     fi
   done
-  OFFLINE_GOPROXY="$build_goproxy" OFFLINE_GOSUMDB="$build_gosumdb" \
-    bash "$script_dir/build-clock-recovery.sh" "$assets_stage/bin/clock-recovery" "$platform" || {
-      echo '无法构建时钟恢复工具；拒绝发布部署资产' >&2
-      exit 1
-    }
+  if [[ -f "$workspace_root/commercial-license-tool/go.mod" \
+    && -f "$workspace_root/commercial-license-tool/cmd/clock-recovery/main.go" \
+    && -f "$workspace_root/license-core/go.mod" ]]; then
+    OFFLINE_GOPROXY="$build_goproxy" OFFLINE_GOSUMDB="$build_gosumdb" \
+      bash "$script_dir/build-clock-recovery.sh" "$assets_stage/bin/clock-recovery" "$platform" || {
+        echo '无法构建时钟恢复工具；拒绝发布部署资产' >&2
+        exit 1
+      }
+  elif [[ "${CLOCK_RECOVERY_ALLOW_MISSING_SOURCE:-0}" == "1" ]]; then
+    echo '单仓库 CI 缺少厂商时钟恢复源码；本次不打包 clock-recovery（厂商构建仍强制构建）' >&2
+  else
+    echo '缺少厂商时钟恢复源码；拒绝发布部署资产（仅单仓库 CI 可显式跳过）' >&2
+    exit 1
+  fi
   python3 "$deploy_dir/bin/build-deployment-compatibility.py" --migrations "$workspace_root/platform/migrations" --release "$version" --output "$assets_stage/deployment-compatibility.json" >/dev/null || {
       echo '无法生成部署兼容性声明；拒绝发布' >&2; exit 1;
     }

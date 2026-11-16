@@ -16,6 +16,10 @@ concurrency:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      # 单仓库 CI 没有厂商 commercial-license-tool/license-core 源码。
+      # 仅允许 CI 跳过该工具的资产构建；厂商多仓库工作区仍强制构建。
+      CLOCK_RECOVERY_ALLOW_MISSING_SOURCE: "1"
     services:
       logout-mysql:
         image: mysql:8.0
