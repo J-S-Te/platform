@@ -6,6 +6,8 @@ builder="$deploy_dir/bin/build-offline-packages.sh"
 fixture="$(mktemp -d "${TMPDIR:-/tmp}/offline-package-builder-test.XXXXXX")"
 trap 'rm -rf -- "$fixture"' EXIT
 mkdir -p "$fixture/tools" "$fixture/output"
+# 同版增量夹具必须保持依赖源一致；前端阶段只检查参数转发，不切换发布输入基线。
+export OFFLINE_NPM_CONFIG_REGISTRY='https://npm.example.invalid'
 
 # macOS 仍随附 Bash 3.2。在 set -u 下，未加花括号的变量若紧跟多字节中文标点，可能被解析为更长且未设置的标识符。此消息须保留花括号，
 # 因为本地镜像复用分支属于受支持的 macOS 交叉构建路径。
@@ -151,10 +153,13 @@ if find "$fixture" -type f \( -name '.build-info.*' -o -name '.build-info-check.
 fi
 
 # 此 Shell 集成夹具仅替换可信验证器进程；加密行为由 license-package Go 测试覆盖。这里检查传输、预检顺序和按客户隔离输出。
+export CLOCK_RECOVERY_TEST_GO="$(command -v go)"
 cat > "$fixture/tools/go" <<'STUB'
 #!/usr/bin/env bash
 set -Eeuo pipefail
-[[ "$PWD" == */platform && "$*" == 'run ./cmd/license-package verify --file '* ]] || exit 1
+if [[ "$PWD" != */platform || "$*" != 'run ./cmd/license-package verify --file '* ]]; then
+  exec "$CLOCK_RECOVERY_TEST_GO" "$@"
+fi
 [[ "${STUB_LICENSE_VERIFY_OK:-false}" == true ]] || {
   echo 'fixture trusted verifier rejected the license' >&2
   exit 1

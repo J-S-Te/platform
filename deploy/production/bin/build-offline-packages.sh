@@ -5,7 +5,8 @@
 #   运行位置：仓库内，platform/deploy/production/bin/。
 #             它依赖同级的 offline-base.Dockerfile、上一级的部署资产目录，
 #             以及工作区中各子系统源码；交付目录顶层的“参考副本”不能就地运行。
-#   前置条件：Docker Engine（含 buildx）；能拉取公共基础镜像。
+#   前置条件：Docker Engine（含 buildx）；构建资产需要兼容源码的本机 Go 工具链；
+#             构建工作站可获取依赖，目标服务器不需要 Go 或网络。
 #   典型用法：./bin/build-offline-packages.sh --component all
 #   产出：    <输出目录>/<组件>-<版本>-linux-amd64.tar.gz   各组件镜像包
 #             <输出目录>/host-dependencies-*.tar.gz       Ubuntu/amd64 宿主依赖
@@ -119,6 +120,8 @@ usage() {
 四场景交付需明确指定 --installation-scenario，禁止按包数量猜测存量。
 --customer-id 可从签名许可证读取；无许可证时必须填写，并提供已批准目录。
 批准目录的 license-migration-evidence.json 描述升级前实际旧镜像，而非目标镜像。
+assets/all 从工程根 commercial-license-tool 与 license-core 构建静态 Linux/amd64
+clock-recovery；构建工作站需要兼容的本机 Go。客户目标机不需要 Go 或网络。
 
 可选环境变量（只用于构建依赖下载，不写入 package.env）：
   OFFLINE_GOPROXY                   Go module 代理链
@@ -436,11 +439,12 @@ source_input_fingerprint() {
 # 参数：无。
 # 返回值：标准输出构建记录；采集失败时返回非零。
 render_build_info() {
-  local source_fingerprint docker_client docker_server buildx_version
+  local source_fingerprint docker_client docker_server buildx_version clock_recovery_go_version
   source_fingerprint="$(source_input_fingerprint)"
   docker_client="$(docker version --format '{{.Client.Version}}' 2>/dev/null || printf unavailable)"
   docker_server="$(docker version --format '{{.Server.Version}}' 2>/dev/null || printf unavailable)"
   buildx_version="$(docker buildx version 2>/dev/null | head -n 1 | tr -d '\r\n')"
+  clock_recovery_go_version="$(GOWORK=off GOENV=off GOTOOLCHAIN=local go version 2>/dev/null || printf unavailable)"
   printf 'RELEASE_VERSION=%s\n' "$version"
   printf 'TARGET_PLATFORM=%s\n' "$platform"
   printf 'SOURCE_INPUT_SHA256=%s\n' "$source_fingerprint"
@@ -453,6 +457,7 @@ render_build_info() {
   printf 'DOCKER_CLIENT_VERSION=%s\n' "$docker_client"
   printf 'DOCKER_SERVER_VERSION=%s\n' "$docker_server"
   printf 'BUILDX_VERSION=%s\n' "${buildx_version:-unavailable}"
+  printf 'CLOCK_RECOVERY_GO_VERSION=%s\n' "$clock_recovery_go_version"
 }
 
 check_build_info_baseline() (
@@ -974,7 +979,8 @@ enabled_compose_modules() {
 package_assets() (
   local assets_archive assets_temporary sidecar_temporary assets_stage relative destination assets_digest
   local -a asset_files=(
-    .env.example .gitignore .release.env.example ACCEPTANCE_CHECKLIST.md BACKUP_RECOVERY.md DEPLOYMENT_COMPATIBILITY.md deployment-compatibility.json DELIVERY_WORKFLOW.md OFFLINE_DEPLOYMENT.md OFFLINE_RUNBOOK.md README.md docker-compose.yml
+    .env.example .gitignore .release.env.example ACCEPTANCE_CHECKLIST.md BACKUP_RECOVERY.md CLOCK_RECOVERY.md DEPLOYMENT_COMPATIBILITY.md deployment-compatibility.json DELIVERY_WORKFLOW.md OFFLINE_DEPLOYMENT.md OFFLINE_RUNBOOK.md README.md docker-compose.yml
+    bin/build-clock-recovery.sh
     bin/acceptance-evidence.sh bin/apply-public-transport.sh bin/backup-all.sh bin/backup-file-gateway.sh bin/backup-keycloak-mysql.sh bin/portal-report-backup.sh bin/prune-backups.sh bin/prune-images.sh
     bin/build-evidence.py bin/build-host-dependencies.sh bin/build-offline-packages.sh bin/compose-scope.sh bin/deploy-common.sh bin/deploy-import.sh bin/deploy-subsystem.sh bin/deploy-license.sh bin/deploy-doctor.sh bin/deploy-package.sh bin/deploy-status.sh bin/deploy-verify.sh bin/deploy-menu.sh bin/deploy-registry.sh bin/deploy-customer-opportunity.sh bin/deploy-service.sh bin/deploy.sh
     bin/drill-file-gateway-restore.sh bin/install-assets.sh bin/lifecycle.sh bin/offline-base.Dockerfile bin/project-background.sh
@@ -1020,6 +1026,9 @@ package_assets() (
   assets_temporary="$(mktemp "$output_root/.deployment-assets.archive.XXXXXX")"
   sidecar_temporary="$(mktemp "$output_root/.deployment-assets.sidecar.XXXXXX")"
   assets_stage="$(mktemp -d "$output_root/.deployment-assets-stage.XXXXXX")"
+  # 用途：清理本次资产构建的临时目录及尚未发布的归档。
+  # 参数：无。
+  # 返回值：保留触发退出时的状态码。
   cleanup_asset_package() {
     local status=$?
     trap - EXIT
@@ -1054,6 +1063,20 @@ package_assets() (
       cp -p -- "$deploy_dir/$relative" "$destination"
     fi
   done
+  if [[ -f "$workspace_root/commercial-license-tool/go.mod" \
+    && -f "$workspace_root/commercial-license-tool/cmd/clock-recovery/main.go" \
+    && -f "$workspace_root/license-core/go.mod" ]]; then
+    OFFLINE_GOPROXY="$build_goproxy" OFFLINE_GOSUMDB="$build_gosumdb" \
+      bash "$script_dir/build-clock-recovery.sh" "$assets_stage/bin/clock-recovery" "$platform" || {
+        echo '无法构建时钟恢复工具；拒绝发布部署资产' >&2
+        exit 1
+      }
+  elif [[ "${CLOCK_RECOVERY_ALLOW_MISSING_SOURCE:-0}" == "1" ]]; then
+    echo '单仓库 CI 缺少厂商时钟恢复源码；本次不打包 clock-recovery（厂商构建仍强制构建）' >&2
+  else
+    echo '缺少厂商时钟恢复源码；拒绝发布部署资产（仅单仓库 CI 可显式跳过）' >&2
+    exit 1
+  fi
   python3 "$deploy_dir/bin/build-deployment-compatibility.py" --migrations "$workspace_root/platform/migrations" --release "$version" --output "$assets_stage/deployment-compatibility.json" >/dev/null || {
       echo '无法生成部署兼容性声明；拒绝发布' >&2; exit 1;
     }

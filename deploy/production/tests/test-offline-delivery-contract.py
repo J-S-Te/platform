@@ -5,6 +5,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -68,36 +69,36 @@ class DeliveryContract(unittest.TestCase):
         self.root = Path(self.temp.name).resolve()
         self.workspace = self.root / "workspace"
         self.production = self.workspace / "platform/deploy/production"
-        shutil.copytree(PRODUCTION, self.production, ignore=shutil.ignore_patterns(
-            "runtime", "backups", "packages", "manifests", ".env", ".release.env",
-            "*.pem", "*.key", "*.bak", "*.backup", "*.dump", "dump*.sql", "__pycache__", "*.pyc"))
+        self.copied_input_hashes = {}
+        self.copy_deployment_build_inputs()
+        self.copy_recovery_build_sources()
         for module in ("platform", "customer_and_opportunity", "contract_management", "project_management", "Settlement", "data_analysis", "reimbursement"):
             for directory in ("cmd", "internal", "migrations", "authz"):
                 (self.workspace / module / directory).mkdir(parents=True, exist_ok=True)
             for name in ("Dockerfile", ".dockerignore", "go.mod", "go.sum", "docker-entrypoint.sh"):
                 source = REPO / module / name
                 if source.is_file():
-                    shutil.copyfile(source, self.workspace / module / name)
+                    self.copy_public_input(source, self.workspace / module / name)
         # 原入口会真实核验会话副本；夹具必须复制全部公开源码输入，不能用成功脚本绕过门禁。
         (self.workspace / "scripts").mkdir(parents=True, exist_ok=True)
         for name in ("check-session-governance-sync.sh", "session-governance.sha256"):
-            shutil.copyfile(REPO / "scripts" / name, self.workspace / "scripts" / name)
+            self.copy_public_input(REPO / "scripts" / name, self.workspace / "scripts" / name)
         for line in (REPO / "scripts/session-governance.sha256").read_text().splitlines():
             _, relative = line.split()
             destination = self.workspace / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(REPO / relative, destination)
+            self.copy_public_input(REPO / relative, destination)
         (self.workspace / 'platform/migrations/000001_fixture.up.sql').write_text(
             '-- Isolated compatibility input; never executed against a database.\nSELECT 1;\n')
         for directory in ("src", "public", "nginx"):
             (self.workspace / "frontend" / directory).mkdir(parents=True, exist_ok=True)
         for name in ("Dockerfile", ".dockerignore", "package.json", "package-lock.json", "index.html", "login.html", "vite.config.js"):
-            shutil.copyfile(REPO / "frontend" / name, self.workspace / "frontend" / name)
+            self.copy_public_input(REPO / "frontend" / name, self.workspace / "frontend" / name)
         for name in ("一键制作离线镜像包.sh", "服务器一键离线部署.sh", "系统运维工具.sh", "清理首次部署产物.sh", "license-activate.sh", "license-upgrade.sh", "forward-recover.sh"):
-            shutil.copyfile(REPO / name, self.workspace / name)
+            self.copy_public_input(REPO / name, self.workspace / name)
         (self.workspace / "操作说明").mkdir()
-        shutil.copyfile(REPO / "操作说明/失败首装清理与重新部署.md",
-                        self.workspace / "操作说明/失败首装清理与重新部署.md")
+        self.copy_public_input(REPO / "操作说明/失败首装清理与重新部署.md",
+                               self.workspace / "操作说明/失败首装清理与重新部署.md")
         for name in ("third_party/license-core/license.go", "scripts/license-core-sync.sh", "scripts/license-core.sha256"):
             path = self.workspace / "platform" / name
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -117,6 +118,70 @@ class DeliveryContract(unittest.TestCase):
                         UIP_BUILD_BUILDER_ID='builder://test/offline-contract',
                         UIP_BUILD_INVOCATION_ID='isolated-delivery-contract',
                         OFFLINE_PULL_RETRIES="1", OFFLINE_PULL_RETRY_DELAY_SECONDS="1", PYTHONDONTWRITEBYTECODE="1")
+        self.verify_copied_inputs()
+
+    # 用途：为恢复交付使用精确静态白名单，其他既有用例沿用原目录布局。
+    # 参数：无；controlled_delivery_inputs 为恢复交付用例显式选择的冻结模式。
+    # 返回值：无；白名单无法解析或公开文件缺失时失败。
+    def copy_deployment_build_inputs(self):
+        if not getattr(self, "controlled_delivery_inputs", False):
+            shutil.copytree(PRODUCTION, self.production, ignore=shutil.ignore_patterns(
+                "runtime", "backups", "packages", "manifests", ".env", ".release.env",
+                "*.pem", "*.key", "*.bak", "*.backup", "*.dump", "dump*.sql", "__pycache__", "*.pyc"))
+            return
+        text = (PRODUCTION / "bin/build-offline-packages.sh").read_text()
+        match = re.search(r"local -a asset_files=\((.*?)\n  \)", text, re.S)
+        self.assertIsNotNone(match, "构建器静态资产白名单不存在")
+        paths = set(match.group(1).split()) | {
+            "tests/test-clock-recovery-delivery.py", "tests/test-offline-delivery-contract.py",
+            "tests/test_git_index_completeness.py",
+        }
+        for relative in sorted(paths):
+            source = PRODUCTION / relative
+            self.assertTrue(source.is_file() and not source.is_symlink(), relative)
+            destination = self.production / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            self.copy_public_input(source, destination)
+
+    # 用途：复制明确列出的公开文件，核对复制前后字节并记录输入摘要。
+    # 参数：source 为当前工程公开文件，destination 为隔离布局内目标。
+    # 返回值：无；源文件变化、链接或复制摘要不符时失败。
+    def copy_public_input(self, source, destination):
+        self.assertTrue(source.is_file() and not source.is_symlink(), str(source))
+        before = hashlib.sha256(source.read_bytes()).hexdigest()
+        shutil.copyfile(source, destination)
+        self.assertEqual(before, hashlib.sha256(source.read_bytes()).hexdigest(), str(source))
+        self.assertEqual(before, hashlib.sha256(destination.read_bytes()).hexdigest(), str(source))
+        self.copied_input_hashes[source.relative_to(REPO).as_posix()] = before
+
+    # 用途：在冻结布局就绪时复核所有公开源与副本，避免跨文件复制混入变化。
+    # 参数：无。
+    # 返回值：无；任一源或副本不再匹配记录摘要时失败。
+    def verify_copied_inputs(self):
+        for relative, digest in self.copied_input_hashes.items():
+            self.assertEqual(digest, hashlib.sha256((REPO / relative).read_bytes()).hexdigest(),
+                             "冻结期间公开源变化：" + relative)
+            self.assertEqual(digest, hashlib.sha256((self.workspace / relative).read_bytes()).hexdigest(),
+                             "冻结副本摘要不符：" + relative)
+
+    # 用途：仅复制恢复工具实际使用的公开 Go 源码到隔离构建夹具。
+    # 参数：无。
+    # 返回值：无；不复制密钥、状态、凭据或运行配置。
+    def copy_recovery_build_sources(self):
+        source_directories = ("commercial-license-tool", "commercial-license-tool/cmd/clock-recovery",
+                              "commercial-license-tool/internal/clockrecovery", "license-core",
+                              "license-core/runtime")
+        # 单仓库 CI 没有厂商多仓库源码；相关定向用例会显式 skip，其余交付用例无需伪造源码。
+        if not all((REPO / relative).is_dir() for relative in source_directories):
+            return
+        for relative in source_directories:
+            source = REPO / relative
+            destination = self.workspace / relative
+            destination.mkdir(parents=True, exist_ok=True)
+            for path in source.iterdir():
+                if (path.is_file() and not path.is_symlink()
+                        and (path.suffix == ".go" or path.name in ("go.mod", "go.sum"))):
+                    self.copy_public_input(path, destination / path.name)
 
     def tearDown(self):
         self.temp.cleanup()
