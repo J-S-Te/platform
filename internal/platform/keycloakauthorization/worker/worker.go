@@ -15,6 +15,8 @@ import (
 type Event struct {
 	ID, TenantID, IdentityID, ApplicationID, EnvironmentID, EventType string
 	Attempts                                                          uint
+	// WorkerID 与 Attempts 共同标识当前领取；同名进程重启仍不能复用旧代次。
+	WorkerID string
 }
 
 // Queue 是投影事件的持久化队列契约：支持回收崩溃遗留锁、按 worker 领取、

@@ -3,6 +3,7 @@ set -Eeuo pipefail
 rollback_skipped=false
 recovery_config_failed=false
 migration_state=not_started
+runtime_write_started=false
 
 # 每次发布只接受带 sha256 digest 的阿里云镜像。版本指针写入 .release.env，运行密钥仍留在
 # 独立 .env 中，避免发布产物或历史镜像记录携带数据库、OAuth 等敏感配置。
@@ -1989,6 +1990,9 @@ deploy_reimbursement() {
   verify_service_image compose reimbursement-worker "$image_ref" || return
 }
 
+# deploy_settlement 在受控备份后排空不兼容旧写者，再迁移和启动结算服务。
+# 参数：无；使用已审批的运行配置和不可变镜像。
+# 返回值：发布成功为零，凭据、排空、迁移或健康检查失败立即停止。
 deploy_settlement() {
   # Settlement 的浏览器会话和权限目录必须先由平台接入流程写入 runtime 文件；
   # 不能用空 Client 启动后再让 API 以 401 循环重试。
@@ -2012,7 +2016,9 @@ deploy_settlement() {
   compose up -d --wait --wait-timeout "${BASIC_PLATFORM_DB_START_TIMEOUT:-600}" settlement-mysql || return
   require_mysql_ready settlement-mysql "${BASIC_PLATFORM_DB_START_TIMEOUT:-600}" || return
   backup_database_if_initialized settlement-mysql settlement settlement || return
+  runtime_protocol_quiesce || return
   compose run --rm --no-deps settlement-migrate || return
+  runtime_write_started=true
   compose up -d --force-recreate --no-deps --wait --wait-timeout 120 settlement-api settlement-worker || return
   if ! wait_for_health "http://127.0.0.1:$(port_value SETTLEMENT_API_PORT 18087)/healthz"; then
     echo "---- settlement-api 最近日志 ----" >&2
@@ -2104,6 +2110,7 @@ deploy_data_analysis() {
   compose up -d --wait --wait-timeout "${BASIC_PLATFORM_DB_START_TIMEOUT:-600}" data-analysis-mysql || return
   require_mysql_ready data-analysis-mysql "${BASIC_PLATFORM_DB_START_TIMEOUT:-600}" || return
   backup_database_if_initialized data-analysis-mysql dashboard_aggregation data-analysis || return
+  runtime_protocol_quiesce || return
   while IFS= read -r runtime_service; do
     [[ -n "$runtime_service" ]] || continue
     compose run --rm --no-deps "$runtime_service" || return
@@ -2121,6 +2128,7 @@ deploy_data_analysis() {
   capture_data_analysis_role_config_hash "$data_analysis_runtime_file"
   update_runtime_value "$data_analysis_runtime_file" OIDC_ROLE_CONFIG_HASH "$embedded_data_analysis_hash" || return 1
   echo "已写入数据看板镜像内嵌授权目录哈希：$embedded_data_analysis_hash"
+  runtime_write_started=true
   compose up -d --force-recreate --no-deps --wait --wait-timeout 120 \
     "${runtime_services[@]}" || {
     # 服务器编排中 data-analysis-api 的健康窗口较窄；新版本启动超过该窗口时
@@ -2159,6 +2167,72 @@ rollback_ref_is_immutable() {
 release_image_value() {
   local key="$1"
   awk -F= -v key="$key" '$1 == key {sub(/^[^=]*=/, ""); print; exit}' "$release_file"
+}
+
+# runtime_protocol_epoch 读取不可变镜像声明的持久运行协议代次。
+# 参数：镜像引用；旧镜像未声明时视为零，不读取运行密钥。
+# 返回值：代次写到标准输出，镜像不可校验或值非法时失败。
+runtime_protocol_epoch() {
+  local ref="$1" epoch
+  if ! docker image inspect "$ref" >/dev/null 2>&1; then
+    docker pull "$ref" >&2 || return 1
+  fi
+  epoch="$(docker image inspect "$ref" --format '{{ index .Config.Labels "com.basic-platform.runtime.epoch" }}')" || return 1
+  case "$epoch" in ''|'<no value>') epoch=0 ;; esac
+  [[ "$epoch" =~ ^[0-9]{1,6}$ ]] || return 1
+  printf '%s\n' "$epoch"
+}
+
+# runtime_protocol_preflight 在发布指针变化前核对持久协议，拒绝直接降代。
+# 参数：无；仅结算和数析使用镜像协议标记，其余发布保持原流程。
+# 返回值：允许升级为零；无法核对或降代时失败，不改指针和进程。
+runtime_protocol_preflight() {
+  runtime_previous_epoch=0
+  runtime_candidate_epoch=0
+  case "$service" in settlement|data-analysis) ;; *) return 0 ;; esac
+  local previous_ref
+  previous_ref="$(release_image_value "$image_key")"
+  runtime_candidate_epoch="$(runtime_protocol_epoch "$image_ref")" || return 1
+  if rollback_ref_is_immutable "$previous_ref"; then
+    runtime_previous_epoch="$(runtime_protocol_epoch "$previous_ref")" || return 1
+  fi
+  if ((10#$runtime_candidate_epoch < 10#$runtime_previous_epoch)); then
+    echo '持久协议不兼容，禁止直接降代；请保留备份和外部归档绑定，按受控恢复方案处理。' >&2
+    return 1
+  fi
+}
+
+# runtime_protocol_quiesce 换代时先停止并核验旧API和后台写者已经退出。
+# 参数：无；应在备份完成后、迁移和任何新写者启动前调用。
+# 返回值：无旧写者或已退出为零；停止或核验失败时禁止继续换代。
+runtime_protocol_quiesce() {
+  [[ "${runtime_candidate_epoch:-0}" != "${runtime_previous_epoch:-0}" ]] || return 0
+  local container running
+  local -a writers=()
+  case "$service" in
+    settlement) writers=(settlement-api settlement-worker) ;;
+    data-analysis) writers=(data-analysis-api data-analysis-aggregation-worker data-analysis-alert-worker) ;;
+    *) return 0 ;;
+  esac
+  compose stop --timeout 90 "${writers[@]}" || return 1
+  local containers
+  containers="$(compose ps -a -q "${writers[@]}")" || return 1
+  while IFS= read -r container; do
+    [[ -n "$container" ]] || continue
+    running="$(docker inspect "$container" --format '{{.State.Running}}')" || return 1
+    [[ "$running" == false ]] || return 1
+  done <<< "$containers"
+}
+
+# runtime_protocol_rollback_allowed 防止新持久语义已经生效后恢复不兼容旧发布指针。
+# 参数：无；新写者启动前的失败及同代失败继续使用原回滚流程。
+# 返回值：可安全回退为零；跨代且可能产生新写入时失败并保留现场。
+runtime_protocol_rollback_allowed() {
+  [[ "${runtime_write_started:-false}" == true ]] || return 0
+  case "$service" in settlement|data-analysis) ;; *) return 0 ;; esac
+  [[ "${runtime_candidate_epoch:-0}" == "${runtime_previous_epoch:-0}" ]] && return 0
+  echo '新协议可能已写入，禁止自动回退旧镜像或旧发布指针；保留候选、备份和网关绑定等待受控恢复。' >&2
+  return 1
 }
 
 restore_legacy_file_gateway_pointer() {
@@ -2315,6 +2389,7 @@ if [[ "$service" == project ]]; then
 fi
 
 require_backup_space || exit 1
+runtime_protocol_preflight || exit 1
 restore_legacy_file_gateway_pointer || exit 1
 release_id="$(date -u +%Y%m%dT%H%M%SZ)"
 previous_release="$(mktemp "$deploy_dir/.release.env.previous.XXXXXX")"
@@ -2530,6 +2605,10 @@ if "$deploy_function"; then
 fi
 
 echo "发布失败，恢复上一镜像；已执行的数据库迁移不会反向回滚" >&2
+if ! runtime_protocol_rollback_allowed; then
+  record_recovery_result failed '持久协议换代后禁止自动降代，当前指针、候选及上一版本备份均已保留'
+  exit 1
+fi
 if [[ "$service" == project ]] && ! project_background_rollback; then
   echo '新后台未能证明排空，禁止先恢复镜像指针；保留当前进程、候选及操作状态。' >&2
   record_recovery_result failed '新后台未能证明排空，未恢复镜像指针'

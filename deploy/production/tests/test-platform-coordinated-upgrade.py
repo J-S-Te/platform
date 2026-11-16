@@ -211,6 +211,9 @@ CLI_PREFIX = SCRIPT.split('script_dir="$(cd --', 1)[0]
 TX_START = SCRIPT.index('require_backup_space || exit 1\n')
 TX_END = SCRIPT.index('if [[ "$service" == "frontend" ]]; then\n  compose_config_ok=', TX_START)
 TRANSACTION = SCRIPT[TX_START:TX_END]
+# 同时装配真实前置协议函数；平台不属于协议换代范围，不应多拉取或检查业务镜像。
+TRANSACTION_PROTOCOL = re.search(r'^runtime_protocol_preflight\(\) \{\n.*?^\}', SCRIPT,
+                                 re.MULTILINE | re.DOTALL).group()
 TRANSACTION_HARNESS = r'''
 deploy_dir="$TEST_ROOT"
 release_file="$deploy_dir/.release.env"
@@ -236,6 +239,9 @@ with tempfile.TemporaryDirectory(prefix='platform-release-transaction-') as dire
     old_proxy = '127.0.0.1:5000/uip/proxy@sha256:' + 'd' * 64
     old_release = 'PLATFORM_IMAGE=old-platform\nFILE_GATEWAY_IMAGE=old-gateway\nDOCKER_SOCKET_PROXY_IMAGE=' + old_proxy + '\n'
 
+    # 用途：执行实际发布事务，核对镜像拉取、完整指针提交与失败恢复。
+    # 参数：name 为隔离场景，arguments 为CLI输入，expected_proxy 为原代理，余项控制故障。
+    # 返回值：实际拉取镜像列表；事务结果或指针不符时断言失败。
     def transaction(name, arguments, expected_proxy, fail_pull='', success=True):
         fixture = base / name
         fixture.mkdir()
@@ -246,7 +252,7 @@ with tempfile.TemporaryDirectory(prefix='platform-release-transaction-') as dire
                    CANDIDATE_PLATFORM=platform, CANDIDATE_GATEWAY=gateway,
                    EXPECTED_PROXY=expected_proxy, FAIL_PULL=fail_pull)
         process = subprocess.run(['bash', '-Eeuo', 'pipefail', '-c',
-                                  CLI_PREFIX + '\n' + TRANSACTION_HARNESS + '\n' + TRANSACTION,
+                                  CLI_PREFIX + '\n' + TRANSACTION_PROTOCOL + '\n' + TRANSACTION_HARNESS + '\n' + TRANSACTION,
                                   'fixture-release', *arguments], env=env, capture_output=True, text=True)
         assert (process.returncode == 0) == success, process.stdout + process.stderr
         if success:

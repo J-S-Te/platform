@@ -92,6 +92,7 @@ UPDATE_CREDENTIAL_SUFFIXES = {
         "contract-import-report-read",
         "audit-publisher",
         "notification-publisher",
+        "owner-directory",
         "contract-dashboard",
         "project-dashboard",
         "settlement-dashboard",

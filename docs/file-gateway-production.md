@@ -59,6 +59,14 @@ CREATED -> UPLOADING -> VALIDATING -> READY
 - `FILE_GATEWAY_TOKEN_AUDIENCE`
 - `FILE_GATEWAY_TOKEN_PUBLIC_KEY_PATH`
 
+连接池采用网关独立预算，默认最大连接20、最大空闲5；支持
+`FILE_GATEWAY_DB_MAX_OPEN_CONNS`、`FILE_GATEWAY_DB_MAX_IDLE_CONNS`、
+`FILE_GATEWAY_DB_CONN_MAX_LIFETIME`（默认`15m`）和
+`FILE_GATEWAY_DB_CONN_MAX_IDLE_TIME`（默认`2m`）。最大连接必须大于零，
+空闲允许零但不能超过最大连接，回收期限必须是正Go duration；非法值启动失败。
+多副本预算需累加并预留其他服务余量。本地及部署编排均显式透传这四项预算；
+实际生效值随受控发布应用，原启动Ping和就绪探测保留。
+
 生产健康检查使用 `/readyz`，会同时探测 MySQL 和存储目录；`/livez` 仅表示进程存活。
 文件目录与 File Gateway MySQL 必须使用同一批次标识备份，恢复后执行对账。
 网关按 70%、80%、90% 记录分级容量日志；达到拒绝阈值后停止新上传，但 READY 文件读取仍可用。

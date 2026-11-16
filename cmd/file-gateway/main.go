@@ -22,7 +22,6 @@ import (
 	"github.com/J-S-Te/Basic-Platform/internal/shared/security"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/shutdown"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/ulid"
-	gormmysql "gorm.io/driver/mysql"
 	"gorm.io/gorm"
 )
 
@@ -41,6 +40,9 @@ func main() {
 	}
 }
 
+// run 装配并运行独立文件网关，连接池和现有依赖探测均通过后开放HTTP。
+// 参数：无；运行设置来自环境变量。
+// 返回值：启动、运行或优雅退出失败时返回错误。
 func run() error {
 	address := getenv("FILE_GATEWAY_HTTP_ADDRESS", ":8086")
 	dsn := os.Getenv("FILE_GATEWAY_DATABASE_DSN")
@@ -50,7 +52,7 @@ func run() error {
 	if dsn == "" || issuer == "" || audience == "" || publicKey == "" {
 		return errors.New("FILE_GATEWAY_DATABASE_DSN and token verifier settings are required")
 	}
-	database, err := gorm.Open(gormmysql.Open(dsn), &gorm.Config{TranslateError: true, SkipDefaultTransaction: true})
+	database, err := openGatewayDatabase(dsn)
 	if err != nil {
 		return err
 	}
