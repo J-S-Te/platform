@@ -280,8 +280,13 @@ pass 'project release forces embedded worker off before deployment'
 
 # 9. 若 Compose 健康窗口过短导致数据分析依赖等待失败，必须回退为等待已运行的 API 容器，不能直接回滚。
 eval "$(extract_function capture_data_analysis_role_config_hash "$deploy_service")"
+eval "$(extract_function runtime_protocol_quiesce "$deploy_service")"
 eval "$(extract_function deploy_data_analysis "$deploy_service")"
 eval "$(extract_function wait_container_healthy "$deploy_service")"
+# 此场景验证同代镜像的启动兜底；跨代旧写者排空由独立协议场景覆盖。
+runtime_previous_epoch=1
+runtime_candidate_epoch=1
+service=data-analysis
 compose() {
   printf 'compose %s\n' "$*" >>"$compose_calls"
   case "$*" in

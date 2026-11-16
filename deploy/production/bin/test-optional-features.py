@@ -130,6 +130,10 @@ docker() {{
   else return 1; fi
 }}
 data_analysis_image_refs=(api aggregation alert migration)
+runtime_previous_epoch=1
+runtime_candidate_epoch=1
+service=data-analysis
+{self.deployment_function('runtime_protocol_quiesce')}
 {self.deployment_function('deploy_data_analysis')}
 deploy_data_analysis
 """
