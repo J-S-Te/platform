@@ -774,7 +774,7 @@ func hardcodedIntegratedServicePurposes(applicationCode string) []string {
 		// SETTLEMENT_CRM_CREDIT_SYNC_ENABLED 控制是否启用，避免启用时才发现平台无用途。
 		return []string{ServiceCredentialSettlementReimbursementCostRead, ServiceCredentialSettlementProjectReferenceRead, ServiceCredentialCRMCreditPaymentIngest, ServiceCredentialOwnerDirectoryRead, ServiceCredentialNotificationIngest}
 	case "data_analysis":
-		return []string{ServiceCredentialContractDashboardRead, ServiceCredentialProjectDashboardRead, ServiceCredentialContractImportReportRead, ServiceCredentialSettlementDashboardRead}
+		return []string{ServiceCredentialContractDashboardRead, ServiceCredentialProjectDashboardRead, ServiceCredentialContractImportReportRead, ServiceCredentialSettlementDashboardRead, ServiceCredentialNotificationIngest}
 	case integratedProjectApplicationCode:
 		// 项目子系统在服务项操作台按人员选择团队负责人/项目经理/工程师，需要只读的
 		// 负责人目录权限；不授予通知写入等其它集成能力。

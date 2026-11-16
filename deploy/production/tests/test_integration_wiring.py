@@ -91,6 +91,7 @@ UPDATE_CREDENTIAL_SUFFIXES = {
     "data_analysis": (
         "contract-import-report-read",
         "audit-publisher",
+        "notification-publisher",
         "contract-dashboard",
         "project-dashboard",
         "settlement-dashboard",
