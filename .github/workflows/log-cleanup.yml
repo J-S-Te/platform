@@ -61,13 +61,13 @@ jobs:
           set -Eeuo pipefail
           echo "== before =="; df -h /
           echo "== container logs =="
-          mapfile -t files < <(find /var/lib/docker/containers -type f -name '*-json.log' -mtime +"$KEEP_DAYS" -size +"$MIN_MB"M -print)
+          mapfile -t files < <(sudo -n find /var/lib/docker/containers -type f -name '*-json.log' -mtime +"$KEEP_DAYS" -size +"$MIN_MB"M -print)
           printf '%s\n' "${files[@]:-}" | sed '/^$/d'
           if [[ "$APPLY" == "--apply" ]]; then
             for f in "${files[@]:-}"; do [[ -f "$f" ]] && sudo truncate -s 0 "$f"; done
           fi
           echo "== application logs =="
-          mapfile -t appfiles < <(find "$DEPLOY_PATH" -type f -name '*.log' -mtime +"$KEEP_DAYS" -size +"$MIN_MB"M -print 2>/dev/null)
+          mapfile -t appfiles < <(sudo -n find "$DEPLOY_PATH" -type f -name '*.log' -mtime +"$KEEP_DAYS" -size +"$MIN_MB"M -print 2>/dev/null)
           printf '%s\n' "${appfiles[@]:-}" | sed '/^$/d'
           if [[ "$APPLY" == "--apply" ]]; then
             for f in "${appfiles[@]:-}"; do [[ -f "$f" ]] && truncate -s 0 "$f"; done
