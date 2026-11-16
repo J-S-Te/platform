@@ -15,6 +15,7 @@ import (
 
 	dictionaryapplication "github.com/J-S-Te/Basic-Platform/internal/platform/dictionary/application"
 	dictionarydomain "github.com/J-S-Te/Basic-Platform/internal/platform/dictionary/domain"
+	"github.com/J-S-Te/Basic-Platform/internal/shared/appctx"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/authctx"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/httperror"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/httpresponse"
@@ -309,6 +310,27 @@ func (handler *Handler) ListActiveItemsByCode(writer http.ResponseWriter, reques
 		return
 	}
 
+	values := make([]itemResponse, 0, len(result.Items))
+	for _, item := range result.Items {
+		values = append(values, itemToResponse(item))
+	}
+	httpresponse.WriteSuccess(writer, request, http.StatusOK, "启用字典项查询成功", pageResponse[itemResponse]{
+		Items: values, Page: result.Page, PageSize: result.PageSize, Total: result.Total,
+	})
+}
+
+// ListActiveItemsByCodeForApplication 供受信业务服务读取启用字典项；租户来自应用凭据。
+func (handler *Handler) ListActiveItemsByCodeForApplication(writer http.ResponseWriter, request *http.Request) {
+	principal, ok := appctx.PrincipalFromContext(request.Context())
+	if !ok {
+		httpresponse.WriteError(writer, request, http.StatusUnauthorized, httperror.Unauthenticated)
+		return
+	}
+	result, err := handler.service.ListActiveItemsByCode(request.Context(), principal.TenantID, request.PathValue("dictionary_code"), pageQuery(request))
+	if err != nil {
+		handler.writeError(writer, request, err)
+		return
+	}
 	values := make([]itemResponse, 0, len(result.Items))
 	for _, item := range result.Items {
 		values = append(values, itemToResponse(item))

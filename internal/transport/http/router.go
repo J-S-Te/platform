@@ -679,9 +679,14 @@ func NewRouter(
 	}
 	// 集成侧审计上报使用独立的 bearer-token 边界：控制台用户角色不授予外部业务系统
 	// 提交审计事件的权限。
-	if applicationAuthenticator != nil && (auditHandler != nil || operational.Notifications != nil || operational.ExternalIdentity != nil || operational.OwnerDirectory != nil || operational.SecurityEvents != nil) {
+	if applicationAuthenticator != nil && (auditHandler != nil || dictionaryHandler != nil || operational.Notifications != nil || operational.ExternalIdentity != nil || operational.OwnerDirectory != nil || operational.SecurityEvents != nil) {
 		integrationRouter := router.Group("/api/v1")
 		integrationRouter.Use(middleware.ApplicationAuthentication(applicationAuthenticator))
+		if dictionaryHandler != nil {
+			// 受信业务服务只读业务字典；复用负责人目录的只读凭据边界，
+			// 不开放字典管理元数据或停用项。
+			integrationRouter.GET("/internal/dictionaries/:dictionary_code/items", middleware.RequireApplicationScope("owner_directory.read"), adaptHandler(dictionaryHandler.ListActiveItemsByCodeForApplication))
+		}
 		if auditHandler != nil {
 			// 子系统审计发布方的免凭据预检：与事件上报共用完全相同的 bearer-token
 			// 与 audit.ingest 边界，但不触发任何 Keycloak 或审计数据变更。
