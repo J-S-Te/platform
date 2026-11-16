@@ -935,10 +935,11 @@ func NewAPI(cfg config.Config) (*API, error) {
 			return nil, err
 		}
 	}
+	auditRecorder := middleware.AuditRecorder(auditService)
 	api := &API{
 		OfflineDelivery: offlineDelivery,
 		Handler: httptransport.NewRouter(
-			cfg, logger, db, authHandler, bootstrapHandler, managementHandler, accountLifecycleHandler, authorizationHandler, applicationAccessHandler, positionGrantHandler, auditHandler, firstRunHandler, configurationHandler, settingsHandler, dictionaryHandler, loginSecurityHandler, applicationTokenHandler, applicationManagementHandler, oauthClientManagementHandler, applicationRegistryService, auditService, oidcHandler, operational,
+			cfg, logger, db, authHandler, bootstrapHandler, managementHandler, accountLifecycleHandler, authorizationHandler, applicationAccessHandler, positionGrantHandler, auditHandler, firstRunHandler, configurationHandler, settingsHandler, dictionaryHandler, loginSecurityHandler, applicationTokenHandler, applicationManagementHandler, oauthClientManagementHandler, applicationRegistryService, auditRecorder, oidcHandler, operational,
 		),
 		Logger:       logger,
 		database:     db,
