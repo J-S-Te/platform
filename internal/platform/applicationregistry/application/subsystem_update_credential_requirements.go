@@ -85,6 +85,8 @@ func SubsystemUpdateServiceCredentialRequirements(applicationCode string) []Subs
 		return []SubsystemUpdateServiceCredentialRequirement{
 			{Purpose: ServiceCredentialContractImportReportRead, Suffix: "contract-import-report-read", ClientName: "历史合同完整摘要读取器", Scopes: []string{"contract.import.report.read"}, Rotate: true},
 			{Purpose: ServiceCredentialAuditIngest, Suffix: "audit-publisher", ClientName: "数据看板与统计分析系统 Audit Publisher", Scopes: []string{"audit.ingest"}, Rotate: true},
+			// 预警规则命中后把站内信投递到平台统一通知入口。
+			{Purpose: ServiceCredentialNotificationIngest, Suffix: "notification-publisher", ClientName: "数据看板与统计分析系统 预警通知投递器", Scopes: []string{"notification.ingest"}, Rotate: true},
 			// 合同与项目读取凭据必须分离；任一密钥泄露时不能横向读取另一业务域。
 			{Purpose: ServiceCredentialContractDashboardRead, Suffix: "contract-dashboard", ClientName: "数据看板合同看板读取器", Scopes: []string{"dashboard.contract.read"}, Rotate: true},
 			{Purpose: ServiceCredentialProjectDashboardRead, Suffix: "project-dashboard", ClientName: "数据看板项目看板读取器", Scopes: []string{"dashboard.project.read"}, Rotate: true},
