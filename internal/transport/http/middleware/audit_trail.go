@@ -523,7 +523,7 @@ func loginIP(value net.IP) string {
 }
 
 func shouldRecordAuditTrail(method, route string) bool {
-	if method == http.MethodPost && (route == "/api/v1/audit/events" || route == "/api/v1/audit/events/batch" || route == "/api/v1/first-run/events") {
+	if method == http.MethodPost && (route == "/api/v1/audit/events" || route == "/api/v1/audit/events/batch") {
 		return false
 	}
 	// 安全审查 SEC-D4a：通用轨迹不再对任何写操作做成功抑制。此前用户应用授权、
@@ -534,6 +534,7 @@ func shouldRecordAuditTrail(method, route string) bool {
 	if strings.HasPrefix(route, "/api/v1/audit/") {
 		return true
 	}
+	// 敏感读清单：只记录会泄露身份、许可、授权或导出内容的读，不做全量 GET。
 	if method == http.MethodGet && isSensitivePlatformRead(route) {
 		return true
 	}
@@ -558,7 +559,20 @@ func isAuditExportDownloadRoute(route string) bool {
 // 合法下载变成 AUDIT_RESPONSE_TOO_LARGE 503。因此下载路由仍然产生审计事件（方法/路径/
 // 主体/状态码/结果），只是响应体按策略不采集（metadata.response_body=not_captured）。
 // 其余路由（含审计查询、票据签发）保持原扣留语义不变。
-var sensitivePlatformReadPrefixes = []string{"/api/v1/licenses/artifact", "/api/v1/licenses/request", "/api/v1/users/", "/api/v1/accounts/", "/api/v1/org-units/", "/api/v1/positions/", "/api/v1/memberships/", "/api/v1/authorization/effective-access", "/api/v1/applications/"}
+
+// sensitivePlatformReadPrefixes 是平台敏感读的唯一路由清单；新增导出/下载/凭据类
+// GET 必须先登记到这里，避免只靠 "/audit/" 前缀漏审。
+var sensitivePlatformReadPrefixes = []string{
+	"/api/v1/licenses/artifact",
+	"/api/v1/licenses/request",
+	"/api/v1/users/",
+	"/api/v1/accounts/",
+	"/api/v1/org-units/",
+	"/api/v1/positions/",
+	"/api/v1/memberships/",
+	"/api/v1/authorization/effective-access",
+	"/api/v1/applications/",
+}
 
 func isSensitivePlatformRead(route string) bool {
 	for _, prefix := range sensitivePlatformReadPrefixes {

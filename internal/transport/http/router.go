@@ -19,7 +19,6 @@ import (
 	dictionaryhttp "github.com/J-S-Te/Basic-Platform/internal/platform/dictionary/interfaces/http"
 	externalidentityhttp "github.com/J-S-Te/Basic-Platform/internal/platform/externalidentity/interfaces/http"
 	filetaskhttp "github.com/J-S-Te/Basic-Platform/internal/platform/filetask/interfaces/http"
-	firstrun "github.com/J-S-Te/Basic-Platform/internal/platform/firstrun"
 	identityhttp "github.com/J-S-Te/Basic-Platform/internal/platform/identity/interfaces/http"
 	licensehttp "github.com/J-S-Te/Basic-Platform/internal/platform/license/interfaces/http"
 	notificationhttp "github.com/J-S-Te/Basic-Platform/internal/platform/notification/interfaces/http"
@@ -95,7 +94,6 @@ func NewRouter(
 	applicationAccessHandler *applicationaccess.Handler,
 	positionGrantHandler *positiongrant.Handler,
 	auditHandler *audithttp.Handler,
-	firstRunHandler *firstrun.Handler,
 	configurationHandler *configurationhttp.Handler,
 	settingsHandler *settingshttp.Handler,
 	dictionaryHandler *dictionaryhttp.Handler,
@@ -275,18 +273,16 @@ func NewRouter(
 		// 在注册点声明，便于审查“哪个接口需要什么能力”。
 		apiRouter.Use(middleware.RequireAllowedOriginForUnsafeMethods(allowedBrowserOrigins...), middleware.RequireSafeWriteContentType())
 		if operational.SecurityEvents != nil {
+			// 必须先于 Authentication：认证失败会 Abort，后续 AuditTrail 看不到 401。
 			apiRouter.Use(middleware.SecurityEventTrail(operational.SecurityEvents, cfg.Audit.ApplicationCode, cfg.Audit.EnvironmentCode, logger))
 		}
 		apiRouter.Use(middleware.Authentication(authHandler, authHandler.CookieName()))
 		if auditRecorder != nil {
 			apiRouter.Use(middleware.AuditTrail(auditRecorder, logger, middleware.AuditSource{ApplicationCode: cfg.Audit.ApplicationCode, EnvironmentCode: cfg.Audit.EnvironmentCode}))
 		}
-		if firstRunHandler != nil {
-			apiRouter.GET("/first-run/config", adaptHandler(firstRunHandler.Config))
-			apiRouter.POST("/first-run/events", adaptHandler(firstRunHandler.Record))
-		}
 		if operational.RuntimeLicenses != nil {
 			apiRouter.GET("/licenses/installation-evidence", middleware.RequirePermission("platform:license:read"), adaptHandler(operational.RuntimeLicenses.InstallationEvidence))
+			apiRouter.GET("/licenses/enforcement", middleware.RequirePermission("platform:license:read"), adaptHandler(operational.RuntimeLicenses.Applications))
 			apiRouter.GET("/licenses/enforcement/:application/overview", middleware.RequirePermission("platform:license:read"), adaptHandler(operational.RuntimeLicenses.Overview))
 			apiRouter.GET("/licenses/enforcement/:application", middleware.RequirePermission("platform:license:read"), adaptHandler(operational.RuntimeLicenses.Status))
 			apiRouter.GET("/licenses/enforcement/:application/evidence", middleware.RequirePermission("platform:license:read"), adaptHandler(operational.RuntimeLicenses.Evidence))

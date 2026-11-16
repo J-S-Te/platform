@@ -1122,3 +1122,19 @@ func TestAuditTrailStreamedResultStageStaysLimitedToDownloadRoutes(t *testing.T)
 		t.Fatalf("dead_letter stage count = %d, want 1", got)
 	}
 }
+
+func TestShouldRecordAuditTrailCoversSensitiveReads(t *testing.T) {
+	for _, route := range []string{
+		"/api/v1/licenses/artifact",
+		"/api/v1/users/:user_id",
+		"/api/v1/authorization/effective-access",
+		"/api/v1/applications/:application_id/authorization-catalog",
+	} {
+		if !shouldRecordAuditTrail(http.MethodGet, route) {
+			t.Fatalf("sensitive GET %s must produce a generic audit record", route)
+		}
+	}
+	if shouldRecordAuditTrail(http.MethodGet, "/api/v1/dictionaries") {
+		t.Fatal("ordinary dictionary GET must remain unaudited")
+	}
+}
