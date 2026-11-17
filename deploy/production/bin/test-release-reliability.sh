@@ -157,6 +157,9 @@ warn() { printf '[警告] %s\n' "$*" >&2; }
 release_id=contract-runtime-fixture
 mkdir -p "$deploy_dir/backups"
 eval "$(extract_function replace_contract_runtime "$deploy_service")"
+eval "$(extract_function runtime_protocol_quiesce "$deploy_service")"
+runtime_candidate_epoch=0
+runtime_previous_epoch=0
 eval "$(extract_function deploy_contract "$deploy_service")"
 image_ref='127.0.0.1:5000/uip/contract@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'
 : >"$project_calls"

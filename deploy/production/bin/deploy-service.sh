@@ -1898,8 +1898,11 @@ deploy_contract() {
   compose up -d --wait --wait-timeout "${BASIC_PLATFORM_DB_START_TIMEOUT:-600}" contract-mysql temporal || return
   require_mysql_ready contract-mysql "${BASIC_PLATFORM_DB_START_TIMEOUT:-600}" || return
   backup_database_if_initialized contract-mysql contract_management contract || return
+  runtime_protocol_quiesce || return
   # 迁移命令由 docker-compose.yml 固定；非零退出会在替换 API 镜像前终止发布。
   compose run --rm --no-deps contract-migrate || return
+  # 新 API 或后台开始前先标记可能写入；跨代失败不得回到不识别墓碑的旧镜像。
+  runtime_write_started=true
   if ! replace_contract_runtime "$image_ref" "${runtime_services[@]}"; then
     echo "---- 合同运行组件启动失败日志 ----" >&2
     compose logs --no-color --tail 120 "${runtime_services[@]}" >&2 || true
@@ -2184,14 +2187,19 @@ runtime_protocol_epoch() {
 }
 
 # runtime_protocol_preflight 在发布指针变化前核对持久协议，拒绝直接降代。
-# 参数：无；仅结算和数析使用镜像协议标记，其余发布保持原流程。
+# 参数：无；合同、结算和数析使用镜像协议标记，其余发布保持原流程。
 # 返回值：允许升级为零；无法核对或降代时失败，不改指针和进程。
 runtime_protocol_preflight() {
   runtime_previous_epoch=0
   runtime_candidate_epoch=0
-  case "$service" in settlement|data-analysis) ;; *) return 0 ;; esac
+  runtime_protocol_changed=false
+  case "$service" in
+    data-analysis) runtime_protocol_data_analysis || return 1; return 0 ;;
+    settlement|contract) ;;
+    *) return 0 ;;
+  esac
   local previous_ref
-  previous_ref="$(release_image_value "$image_key")"
+  previous_ref="$(release_image_value "$image_key")" || return 1
   runtime_candidate_epoch="$(runtime_protocol_epoch "$image_ref")" || return 1
   if rollback_ref_is_immutable "$previous_ref"; then
     runtime_previous_epoch="$(runtime_protocol_epoch "$previous_ref")" || return 1
@@ -2200,16 +2208,53 @@ runtime_protocol_preflight() {
     echo '持久协议不兼容，禁止直接降代；请保留备份和外部归档绑定，按受控恢复方案处理。' >&2
     return 1
   fi
+  [[ "$runtime_candidate_epoch" == "$runtime_previous_epoch" ]] || runtime_protocol_changed=true
+  return 0
+}
+
+# runtime_protocol_data_analysis 用途：检查四种数析镜像同代，并逐一拒绝旧组件的降代。
+# 参数：无；使用已校验的候选四镜像与现有不可变发布指针。
+# 返回值：全部候选同代且均不低于各自旧代次为零；失败不改指针。
+runtime_protocol_data_analysis() {
+  ((${#data_analysis_image_refs[@]} == 4 && ${#data_analysis_image_keys[@]} == 4)) || return 1
+  local index candidate previous previous_ref
+  for index in 0 1 2 3; do
+    candidate="$(runtime_protocol_epoch "${data_analysis_image_refs[$index]}")" || return 1
+    if ((index == 0)); then
+      runtime_candidate_epoch="$candidate"
+    elif [[ "$candidate" != "$runtime_candidate_epoch" ]]; then
+      echo '数析API、聚合、预警与迁移候选镜像持久协议代次不一致，禁止混代发布。' >&2
+      return 1
+    fi
+    previous=0
+    previous_ref="$(release_image_value "${data_analysis_image_keys[$index]}")" || return 1
+    if rollback_ref_is_immutable "$previous_ref"; then
+      previous="$(runtime_protocol_epoch "$previous_ref")" || return 1
+    fi
+    if ((10#$candidate < 10#$previous)); then
+      echo '数析候选低于已有组件持久协议代次，禁止直接降代。' >&2
+      return 1
+    fi
+    if ((10#$previous > 10#$runtime_previous_epoch)); then runtime_previous_epoch="$previous"; fi
+    [[ "$candidate" == "$previous" ]] || runtime_protocol_changed=true
+  done
+  return 0
 }
 
 # runtime_protocol_quiesce 换代时先停止并核验旧API和后台写者已经退出。
 # 参数：无；应在备份完成后、迁移和任何新写者启动前调用。
 # 返回值：无旧写者或已退出为零；停止或核验失败时禁止继续换代。
 runtime_protocol_quiesce() {
-  [[ "${runtime_candidate_epoch:-0}" != "${runtime_previous_epoch:-0}" ]] || return 0
+  if [[ "${runtime_protocol_changed:-false}" != true && "${runtime_candidate_epoch:-0}" == "${runtime_previous_epoch:-0}" ]]; then return 0; fi
   local container running
   local -a writers=()
   case "$service" in
+    contract)
+      local selected writer
+      selected="$(scope_runtime_services contract)" || return 1
+      while IFS= read -r writer; do [[ -z "$writer" ]] || writers+=("$writer"); done <<< "$selected"
+      ((${#writers[@]} > 0)) || return 1
+      ;;
     settlement) writers=(settlement-api settlement-worker) ;;
     data-analysis) writers=(data-analysis-api data-analysis-aggregation-worker data-analysis-alert-worker) ;;
     *) return 0 ;;
@@ -2229,8 +2274,8 @@ runtime_protocol_quiesce() {
 # 返回值：可安全回退为零；跨代且可能产生新写入时失败并保留现场。
 runtime_protocol_rollback_allowed() {
   [[ "${runtime_write_started:-false}" == true ]] || return 0
-  case "$service" in settlement|data-analysis) ;; *) return 0 ;; esac
-  [[ "${runtime_candidate_epoch:-0}" == "${runtime_previous_epoch:-0}" ]] && return 0
+  case "$service" in settlement|data-analysis|contract) ;; *) return 0 ;; esac
+  if [[ "${runtime_protocol_changed:-false}" != true && "${runtime_candidate_epoch:-0}" == "${runtime_previous_epoch:-0}" ]]; then return 0; fi
   echo '新协议可能已写入，禁止自动回退旧镜像或旧发布指针；保留候选、备份和网关绑定等待受控恢复。' >&2
   return 1
 }

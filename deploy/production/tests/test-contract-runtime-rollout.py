@@ -45,10 +45,12 @@ if args[0] == "compose":
             if service in state:
                 state[service] = os.environ["IMAGE"]
     if command == "ps":
-        print(services[0])
+        print("\n".join(services))
 elif args[0] == "docker":
     service = args[-1] if args[-1].startswith("contract-") else args[2]
-    if "Image" in " ".join(args):
+    if ".State.Running" in " ".join(args):
+        print("false" if state[service] == "stopped" else "true")
+    elif "Image" in " ".join(args):
         print("wrong" if os.environ.get("FAIL_POINT") == "image:" + service else state[service])
     else:
         healthy = os.environ.get("FAIL_POINT") != "health:" + service
@@ -59,10 +61,10 @@ elif args[0] == "docker":
 
 class ContractRolloutTest(unittest.TestCase):
     # 用途：运行真实合同发布或回滚函数并收集隔离容器边界调用。
-    # 参数：failure 为失败边界；rollback 选择回滚；services 为选中运行组件。
+    # 参数：failure 为失败边界；rollback 选择回滚；services 为运行组件；epoch 为候选代次。
     # 返回值：退出码、事件列表及是否出现新 API 与旧 Worker 混跑。
     def run_rollout(self, failure="", rollback=False,
-                    services="contract-api\ncontract-worker"):
+                    services="contract-api\ncontract-worker", epoch=0):
         with tempfile.TemporaryDirectory(prefix="contract-rollout-") as directory:
             root = Path(directory)
             (root / "fake").write_text(FAKE)
@@ -71,11 +73,13 @@ class ContractRolloutTest(unittest.TestCase):
                 '{"contract-api":"old","contract-worker":"old"}')
             (root / "events").touch()
             names = ("replace_contract_runtime", "deploy_contract", "rollback_runtime",
-                     "verify_service_image", "verify_service_stable")
+                     "verify_service_image", "verify_service_stable", "runtime_protocol_quiesce")
             harness = "\n".join(function(name) for name in names) + r'''
 compose() { "$FIXTURE/fake" compose "$@"; }
 docker() { "$FIXTURE/fake" docker "$@"; }
 scope_runtime_services() { printf '%s\n' "$SERVICES"; }
+runtime_candidate_epoch="$CANDIDATE_EPOCH"
+runtime_previous_epoch=0
 require_contract_runtime_value() { :; }
 contract_env_value() { [[ "$1" != PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED ]] || echo true; }
 ensure_temporal_application_network() { :; }
@@ -99,12 +103,25 @@ if "$command"; then exit 0; else exit "$?"; fi
                 ["bash", "-Eeuo", "pipefail", "-c", harness], capture_output=True,
                 text=True, env=dict(os.environ, FIXTURE=directory, SERVICES=services,
                                     FAIL_POINT=failure, ROLLBACK=str(rollback).lower(),
+                                    CANDIDATE_EPOCH=str(epoch),
                                     IMAGE="registry.example/contract@sha256:" + "a" * 64,
                                     DEPLOY_STABILITY_WINDOW_SECONDS="0"))
             events = (root / "events").read_text().splitlines()
             if not failure:
                 self.assertEqual(process.returncode, 0, process.stderr)
             return process.returncode, events, (root / "mixed").exists()
+
+    # 用途：执行真实合同发布函数，验证跨代先备份、排空再迁移。
+    # 参数：self 为测试上下文；所有容器状态均在任务独占的临时目录。
+    # 返回值：无；任一旧写者未停止即迁移时失败。
+    def test_contract_epoch_quiesces_before_migration(self):
+        code, events, mixed = self.run_rollout(epoch=1)
+        self.assertEqual(code, 0)
+        stopped = events.index("compose stop --timeout 90 contract-api contract-worker")
+        migrated = events.index("compose run --rm --no-deps contract-migrate")
+        self.assertLess(events.index("backup"), stopped)
+        self.assertLess(stopped, migrated)
+        self.assertFalse(mixed)
 
     # 用途：证明备份/迁移完成后按 API 停止、Worker 停止/验证、API 启动顺序发布。
     # 参数：无。

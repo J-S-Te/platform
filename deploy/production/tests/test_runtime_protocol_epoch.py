@@ -14,7 +14,7 @@ SOURCE = (Path(__file__).resolve().parents[1] / "bin/deploy-service.sh").read_te
 # 参数：body 为合成不可变镜像和Docker/Compose边界的测试步骤。
 # 返回值：真实函数执行结果；不存在协议防护时立即失败。
 def run_protocol(body):
-    names = ["epoch", "preflight", "quiesce", "rollback_allowed"]
+    names = ["epoch", "data_analysis", "preflight", "quiesce", "rollback_allowed"]
     functions = []
     for suffix in names:
         match = re.search(r"^runtime_protocol_" + suffix + r"\(\) \{\n.*?^\}", SOURCE, re.M | re.S)
@@ -30,6 +30,7 @@ old_ref=old
 runtime_write_started=false
 release_image_value() { printf '%s\n' "$old_ref"; }
 rollback_ref_is_immutable() { test -n "$1"; }
+scope_runtime_services() { printf '%s\n' contract-api contract-worker; }
 docker() {
   if [[ "$1" == image ]]; then
     [[ "$3" == old ]] && printf '0\n' || printf '1\n'
@@ -48,6 +49,47 @@ compose() {
 
 
 class RuntimeProtocolTests(unittest.TestCase):
+    # 用途：验证合同跨代与结算沿用相同的禁止旧读写者复活边界。
+    # 参数：self 为隔离 Bash 测试上下文。
+    # 返回值：无；跨代后允许回旧合同镜像时失败。
+    def test_contract_epoch_blocks_old_pointer(self):
+        result = run_protocol('service=contract; runtime_protocol_preflight; runtime_protocol_quiesce; '
+                              'runtime_write_started=true; if runtime_protocol_rollback_allowed; then exit 99; fi')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('contract-api contract-worker', result.stdout)
+
+    # 用途：验证迁移镜像也必须与数析三个运行镜像同代。
+    # 参数：self 为隔离 Bash 测试上下文。
+    # 返回值：无；候选混代或任一旧组件降代仍获准时失败。
+    def test_data_analysis_checks_all_four_images(self):
+        setup = r'''
+service=data-analysis
+data_analysis_image_keys=(API AGG ALERT MIGRATE)
+data_analysis_image_refs=(new-api new-agg new-alert new-migrate)
+release_image_value() { printf 'old-%s\n' "$1"; }
+docker() {
+  if [[ "$1" == image ]]; then
+    case "$3" in
+      new-*) printf '2\n' ;;
+      old-*) printf '1\n' ;;
+      *) printf '0\n' ;;
+    esac
+  else printf 'false\n'; fi
+}
+'''
+        good = run_protocol(setup + 'runtime_protocol_preflight; runtime_protocol_quiesce')
+        self.assertEqual(good.returncode, 0, good.stderr)
+        self.assertIn('data-analysis-aggregation-worker', good.stdout)
+        mixed = run_protocol(setup + 'data_analysis_image_refs[3]=legacy-migrate; runtime_protocol_preflight')
+        self.assertNotEqual(mixed.returncode, 0)
+        older_worker = run_protocol(setup + r'''
+docker() { if [[ "$1" == image ]]; then
+  case "$3" in old-AGG) printf '3\n';; new-*) printf '2\n';; *) printf '1\n';; esac
+  else printf 'false\n'; fi; }
+runtime_protocol_preflight
+''')
+        self.assertNotEqual(older_worker.returncode, 0)
+
     # 用途：验证升级先排空旧写者，候选可能写入后禁止旧指针恢复。
     # 参数：self 为测试上下文。
     # 返回值：无；跨代回滚或排空缺失时失败。
