@@ -101,3 +101,40 @@ func TestDeleteItemRequiresFullContext(t *testing.T) {
 		t.Fatalf("input=%+v", repo.itemInput)
 	}
 }
+type itemRecordingRepository struct {
+	Repository
+	createdItem ItemCreateInput
+}
+
+func (r *itemRecordingRepository) CreateItem(_ context.Context, input ItemCreateInput, id string, _ time.Time) (domain.Item, error) {
+	r.createdItem = input
+	return domain.Item{ID: id, Code: input.Code, Tone: input.Tone}, nil
+}
+
+func TestCreateItemRejectsToneOutsideSemanticPalette(t *testing.T) {
+	service, _ := NewService(&itemRecordingRepository{}, dictionaryTestID{}, dictionaryTestClock{})
+	_, err := service.CreateItem(context.Background(), ItemCreateInput{
+		TenantID: "tenant", DictionaryID: "dict", OperatorID: "user",
+		Code: "PLAN_REVOKED", Label: "待重新制定", Value: "待重新制定",
+		Tone: "violet", Status: domain.StatusActive,
+	})
+	if !errors.Is(err, ErrValidation) {
+		t.Fatalf("violet 不应通过校验，err=%v", err)
+	}
+}
+
+func TestCreateItemNormalizesSemanticTone(t *testing.T) {
+	repo := &itemRecordingRepository{}
+	service, _ := NewService(repo, dictionaryTestID{}, dictionaryTestClock{})
+	_, err := service.CreateItem(context.Background(), ItemCreateInput{
+		TenantID: "tenant", DictionaryID: "dict", OperatorID: "user",
+		Code: "PLAN_REVOKED", Label: "待重新制定", Value: "待重新制定",
+		Tone: " WARNING ", Status: domain.StatusActive,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repo.createdItem.Tone != "warning" {
+		t.Fatalf("tone 应归一为小写，got=%q", repo.createdItem.Tone)
+	}
+}

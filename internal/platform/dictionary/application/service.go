@@ -93,8 +93,12 @@ type ItemCreateInput struct {
 	OperatorID   string
 	Code         string
 	Label        string
+	I18nKey      string
 	Value        string
+	Tone         string
 	SortOrder    uint
+	Terminal     bool
+	Actionable   bool
 	Status       domain.Status
 }
 
@@ -107,8 +111,12 @@ type ItemUpdateInput struct {
 	OperatorID   string
 	Code         string
 	Label        string
+	I18nKey      string
 	Value        string
+	Tone         string
 	SortOrder    uint
+	Terminal     bool
+	Actionable   bool
 	Status       domain.Status
 	Version      uint64
 }
@@ -226,7 +234,7 @@ func (service *Service) ListItems(ctx context.Context, tenantID, dictionaryID st
 func (service *Service) CreateItem(ctx context.Context, input ItemCreateInput) (domain.Item, error) {
 	input = normalizeCreateItem(input)
 	if input.TenantID == "" || input.DictionaryID == "" || input.OperatorID == "" ||
-		!validItem(input.Code, input.Label, input.Value, input.Status) {
+		!validItem(input.Code, input.Label, input.Value, input.Tone, input.Status) {
 		return domain.Item{}, ErrValidation
 	}
 
@@ -244,7 +252,7 @@ func (service *Service) CreateItem(ctx context.Context, input ItemCreateInput) (
 func (service *Service) UpdateItem(ctx context.Context, input ItemUpdateInput) (domain.Item, error) {
 	input = normalizeUpdateItem(input)
 	if input.TenantID == "" || input.DictionaryID == "" || input.ItemID == "" || input.OperatorID == "" || input.Version == 0 ||
-		!validItem(input.Code, input.Label, input.Value, input.Status) {
+		!validItem(input.Code, input.Label, input.Value, input.Tone, input.Status) {
 		return domain.Item{}, ErrValidation
 	}
 
@@ -350,6 +358,8 @@ func normalizeCreateItem(input ItemCreateInput) ItemCreateInput {
 	input.Code = strings.TrimSpace(input.Code)
 	input.Label = strings.TrimSpace(input.Label)
 	input.Value = strings.TrimSpace(input.Value)
+	input.Tone = strings.ToLower(strings.TrimSpace(input.Tone))
+	input.I18nKey = strings.TrimSpace(input.I18nKey)
 	input.Status = normalizeStatus(input.Status)
 
 	return input
@@ -363,6 +373,8 @@ func normalizeUpdateItem(input ItemUpdateInput) ItemUpdateInput {
 	input.Code = strings.TrimSpace(input.Code)
 	input.Label = strings.TrimSpace(input.Label)
 	input.Value = strings.TrimSpace(input.Value)
+	input.Tone = strings.ToLower(strings.TrimSpace(input.Tone))
+	input.I18nKey = strings.TrimSpace(input.I18nKey)
 	input.Status = normalizeStatus(input.Status)
 
 	return input
@@ -376,8 +388,18 @@ func validDictionary(code, name, description string, status domain.Status) bool 
 	return validCode(code) && name != "" && len(name) <= 100 && len(description) <= 500 && validStatus(status)
 }
 
-func validItem(code, label, value string, status domain.Status) bool {
-	return validCode(code) && label != "" && len(label) <= 100 && value != "" && len(value) <= 255 && validStatus(status)
+func validItem(code, label, value, tone string, status domain.Status) bool {
+	return validCode(code) && label != "" && len(label) <= 100 && value != "" && len(value) <= 255 &&
+		validTone(tone) && validStatus(status)
+}
+
+// validTone 只接受五档语义色；空值表示该字典项与状态无关（例如合同类型），不强制填。
+func validTone(tone string) bool {
+	switch tone {
+	case "", "neutral", "processing", "success", "warning", "danger":
+		return true
+	}
+	return false
 }
 
 func validStatus(status domain.Status) bool {

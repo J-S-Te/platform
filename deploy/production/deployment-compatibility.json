@@ -3,8 +3,8 @@
   "config_contract": "1",
   "database": {
     "current_min": 0,
-    "migrate_to": 145,
-    "migration_set_sha256": "6f4c461c32088743214d3892f27c74386018bbaea32b86a4b134e3209aa37ef6",
+    "migrate_to": 146,
+    "migration_set_sha256": "0ff6f2d8356feee55f007f4edd38822c57501bf863d128ce94dd8af0c9d9b82e",
     "previous_program_after_migration": "unknown"
   },
   "recovery": {
