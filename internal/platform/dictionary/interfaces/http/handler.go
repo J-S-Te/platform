@@ -60,12 +60,16 @@ type dictionaryPayload struct {
 }
 
 type itemPayload struct {
-	Code      string `json:"code"`
-	Label     string `json:"label"`
-	Value     string `json:"value"`
-	SortOrder uint   `json:"sort_order"`
-	Status    string `json:"status"`
-	Version   uint64 `json:"version"`
+	Code       string `json:"code"`
+	Label      string `json:"label"`
+	I18nKey    string `json:"i18n_key,omitempty"`
+	Value      string `json:"value"`
+	Tone       string `json:"tone,omitempty"`
+	SortOrder  uint   `json:"sort_order"`
+	Terminal   bool   `json:"terminal,omitempty"`
+	Actionable *bool  `json:"actionable,omitempty"`
+	Status     string `json:"status"`
+	Version    uint64 `json:"version"`
 }
 
 type dictionaryResponse struct {
@@ -84,8 +88,12 @@ type itemResponse struct {
 	DictionaryID string `json:"dictionary_id"`
 	Code         string `json:"code"`
 	Label        string `json:"label"`
+	I18nKey      string `json:"i18n_key,omitempty"`
 	Value        string `json:"value"`
+	Tone         string `json:"tone,omitempty"`
 	SortOrder    uint   `json:"sort_order"`
+	Terminal     bool   `json:"terminal,omitempty"`
+	Actionable   bool   `json:"actionable"`
 	Status       string `json:"status"`
 	Version      uint64 `json:"version"`
 	UpdatedAt    string `json:"updated_at"`
@@ -220,7 +228,9 @@ func (handler *Handler) CreateItem(writer http.ResponseWriter, request *http.Req
 
 	result, err := handler.service.CreateItem(request.Context(), dictionaryapplication.ItemCreateInput{
 		TenantID: principal.Tenant.ID, DictionaryID: request.PathValue("dictionary_id"), OperatorID: principal.User.ID,
-		Code: payload.Code, Label: payload.Label, Value: payload.Value, SortOrder: payload.SortOrder, Status: dictionarydomain.Status(payload.Status),
+		Code: payload.Code, Label: payload.Label, I18nKey: payload.I18nKey, Value: payload.Value, Tone: payload.Tone,
+		SortOrder: payload.SortOrder, Terminal: payload.Terminal, Actionable: actionableValue(payload.Actionable),
+		Status: dictionarydomain.Status(payload.Status),
 	})
 	if err != nil {
 		handler.writeError(writer, request, err)
@@ -244,7 +254,8 @@ func (handler *Handler) UpdateItem(writer http.ResponseWriter, request *http.Req
 
 	result, err := handler.service.UpdateItem(request.Context(), dictionaryapplication.ItemUpdateInput{
 		TenantID: principal.Tenant.ID, DictionaryID: request.PathValue("dictionary_id"), ItemID: request.PathValue("item_id"),
-		OperatorID: principal.User.ID, Code: payload.Code, Label: payload.Label, Value: payload.Value, SortOrder: payload.SortOrder,
+		OperatorID: principal.User.ID, Code: payload.Code, Label: payload.Label, I18nKey: payload.I18nKey, Value: payload.Value,
+		Tone: payload.Tone, SortOrder: payload.SortOrder, Terminal: payload.Terminal, Actionable: actionableValue(payload.Actionable),
 		Status: dictionarydomain.Status(payload.Status), Version: payload.Version,
 	})
 	if err != nil {
@@ -422,14 +433,26 @@ func dictionaryToResponse(dictionary dictionarydomain.Dictionary) dictionaryResp
 	}
 }
 
+// actionableValue 让“未提交该字段”保持默认可操作；显式 false 才表示终态。
+func actionableValue(value *bool) bool {
+	if value == nil {
+		return true
+	}
+	return *value
+}
+
 func itemToResponse(item dictionarydomain.Item) itemResponse {
 	return itemResponse{
 		ID:           item.ID,
 		DictionaryID: item.DictionaryID,
 		Code:         item.Code,
 		Label:        item.Label,
+		I18nKey:      item.I18nKey,
 		Value:        item.Value,
+		Tone:         item.Tone,
 		SortOrder:    item.SortOrder,
+		Terminal:     item.Terminal,
+		Actionable:   item.Actionable,
 		Status:       string(item.Status),
 		Version:      item.Version,
 		UpdatedAt:    item.UpdatedAt.UTC().Format(time.RFC3339Nano),

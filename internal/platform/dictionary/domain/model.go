@@ -37,8 +37,12 @@ type Item struct {
 	DictionaryID string
 	Code         string
 	Label        string
+	I18nKey      string
 	Value        string
+	Tone         string
 	SortOrder    uint
+	Terminal     bool
+	Actionable   bool
 	Status       Status
 	Version      uint64
 	UpdatedAt    time.Time

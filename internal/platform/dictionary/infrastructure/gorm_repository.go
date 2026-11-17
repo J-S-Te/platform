@@ -53,8 +53,12 @@ type itemModel struct {
 	DictionaryID string    `gorm:"column:dictionary_id"`
 	Code         string    `gorm:"column:code"`
 	Label        string    `gorm:"column:label"`
+	I18nKey      *string   `gorm:"column:i18n_key"`
 	Value        string    `gorm:"column:item_value"`
+	Tone         *string   `gorm:"column:tone"`
 	SortOrder    uint      `gorm:"column:sort_order"`
+	Terminal     bool      `gorm:"column:terminal"`
+	Actionable   bool      `gorm:"column:actionable"`
 	Status       string    `gorm:"column:status"`
 	Version      uint64    `gorm:"column:version"`
 	CreatedAt    time.Time `gorm:"column:created_at"`
@@ -325,8 +329,12 @@ func (repository *Repository) CreateItem(
 			DictionaryID: input.DictionaryID,
 			Code:         input.Code,
 			Label:        input.Label,
+			I18nKey:      optionalString(input.I18nKey),
 			Value:        input.Value,
+			Tone:         optionalString(input.Tone),
 			SortOrder:    input.SortOrder,
+			Terminal:     input.Terminal,
+			Actionable:   input.Actionable,
 			Status:       string(input.Status),
 			Version:      1,
 			CreatedAt:    now,
@@ -373,15 +381,20 @@ func (repository *Repository) UpdateItem(
 		operatorID := input.OperatorID
 		row.Code = input.Code
 		row.Label = input.Label
+		row.I18nKey = optionalString(input.I18nKey)
 		row.Value = input.Value
+		row.Tone = optionalString(input.Tone)
 		row.SortOrder = input.SortOrder
+		row.Terminal = input.Terminal
+		row.Actionable = input.Actionable
 		row.Status = string(input.Status)
 		row.Version++
 		row.UpdatedAt = now
 		row.UpdatedBy = &operatorID
 		if err := transaction.Model(&itemModel{}).
 			Where("id = ? AND dictionary_id = ? AND tenant_id = ?", row.ID, input.DictionaryID, input.TenantID).
-			Select("code", "label", "item_value", "sort_order", "status", "version", "updated_at", "updated_by").
+			Select("code", "label", "i18n_key", "item_value", "tone", "sort_order", "terminal", "actionable",
+				"status", "version", "updated_at", "updated_by").
 			Updates(&row).Error; err != nil {
 			return mapError(err)
 		}
@@ -514,12 +527,33 @@ func itemToDomain(row itemModel) dictionarydomain.Item {
 		DictionaryID: row.DictionaryID,
 		Code:         row.Code,
 		Label:        row.Label,
+		I18nKey:      stringValue(row.I18nKey),
 		Value:        row.Value,
+		Tone:         stringValue(row.Tone),
 		SortOrder:    row.SortOrder,
+		Terminal:     row.Terminal,
+		Actionable:   row.Actionable,
 		Status:       dictionarydomain.Status(row.Status),
 		Version:      row.Version,
 		UpdatedAt:    row.UpdatedAt,
 	}
+}
+
+// optionalString 把空字符串写成 NULL，避免“没有语义”和“空语义”两种状态混在库里。
+func optionalString(value string) *string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return nil
+	}
+	return &trimmed
+}
+
+// stringValue 读取可空列；NULL 视为未设置。
+func stringValue(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
 }
 
 func mapError(err error) error {
