@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/J-S-Te/Basic-Platform/internal/platform/authorization/applicationaccess"
 	oidcapplication "github.com/J-S-Te/Basic-Platform/internal/platform/oidc/application"
 	"github.com/J-S-Te/Basic-Platform/internal/platform/oidc/interfaces/tokenissuer"
 	"github.com/J-S-Te/Basic-Platform/internal/shared/security"
@@ -278,4 +279,40 @@ func (m platformAccessTokenJWTManager) VerifyAccessToken(string, string, time.Ti
 }
 func (m platformAccessTokenJWTManager) VerifyIDToken(string, string, time.Time) (security.OIDCTokenClaims, error) {
 	return security.OIDCTokenClaims{}, errors.New("not an ID token")
+}
+
+// TestAuthorizationContextFreshReadObservesRevocation 验证旧合法身份令牌可立即读到撤销。
+// 参数：t 为隔离HTTP与内存解析器测试上下文。
+// 返回值：无；刷新标记未贯穿平台缓存或错误清除身份校验时失败。
+func TestAuthorizationContextFreshReadObservesRevocation(t *testing.T) {
+	resolver := &authorizationContextResolverStub{}
+	handler := &Handler{
+		jwtManager: rejectingExternalJWTManager{}, accessTokenSubjects: accessTokenSubjectResolverStub{},
+		externalAuthorizationVerifier: externalAuthorizationVerifierStub{claims: ExternalAuthorizationTokenClaims{
+			Subject: "identity-1", IdentityID: "identity-1", TenantID: "tenant-1", SessionID: "session-1",
+			AuthorizedParty: "contract-prod-web", Audience: []string{"contract-prod-web"}, TokenUse: "access_token",
+		}},
+		authorizationContextResolver: applicationaccess.NewCachingAuthorizationContextResolver(resolver, time.Minute),
+		clock:                        authorizationContextClock{}, logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	read := func(fresh bool) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(http.MethodGet, "/oauth2/authorization-context", nil)
+		request.Header.Set("Authorization", "Bearer unchanged-valid-token")
+		if fresh {
+			request.Header.Set("X-Authorization-Refresh", "1")
+		}
+		response := httptest.NewRecorder()
+		handler.AuthorizationContext(response, request)
+		return response
+	}
+	if response := read(false); response.Code != http.StatusOK {
+		t.Fatalf("initial status=%d", response.Code)
+	}
+	resolver.err = oidcapplication.ErrAccessDenied
+	if response := read(false); response.Code != http.StatusOK {
+		t.Fatalf("ordinary burst read status=%d", response.Code)
+	}
+	if response := read(true); response.Code != http.StatusForbidden {
+		t.Fatalf("fresh revocation status=%d want=403, body=%s", response.Code, response.Body.String())
+	}
 }
