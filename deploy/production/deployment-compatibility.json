@@ -11,6 +11,6 @@
     "requires_backup": true,
     "type": "forward-only"
   },
-  "release": "2026-11-06",
+  "release": "2026-11-18",
   "schema": "uip.deployment-compatibility/v1"
 }

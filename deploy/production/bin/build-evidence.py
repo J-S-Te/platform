@@ -40,6 +40,7 @@ DOCKERFILES = {
     "customer-portal": ("customer_and_opportunity/Dockerfile",),
     "contract": ("contract_management/Dockerfile",),
     "project": ("project_management/Dockerfile",),
+    "reimbursement": ("reimbursement/Dockerfile",),
     "settlement": ("Settlement/Dockerfile",),
     "data-analysis": ("data_analysis/Dockerfile",),
 }

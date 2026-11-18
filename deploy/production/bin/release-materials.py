@@ -21,6 +21,7 @@ APP_BY_COMPONENT = {
     "customer-opportunity": "customer_and_opportunity",
     "customer-portal": "customer_portal",
     "project": "project_management",
+    "reimbursement": "reimbursement",
     "settlement": "settlement",
     "data-analysis": "data_analysis",
 }
