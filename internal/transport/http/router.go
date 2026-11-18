@@ -573,8 +573,10 @@ func NewRouter(
 			apiRouter.POST("/notifications/deliveries/retry", middleware.RequirePermission("platform:notification:operate"), adaptHandler(operational.Notifications.RetryFailed))
 			apiRouter.GET("/notifications/inbox", adaptHandler(operational.Notifications.ListInbox))
 			apiRouter.GET("/notifications/inbox/unread-count", adaptHandler(operational.Notifications.UnreadCount))
+			apiRouter.GET("/notifications/badge", adaptHandler(operational.Notifications.UnreadBadge))
 			apiRouter.GET("/notifications/inbox/:delivery_id", adaptHandler(operational.Notifications.GetInboxItem))
 			apiRouter.POST("/notifications/inbox/:delivery_id/read", adaptHandler(operational.Notifications.MarkRead))
+			apiRouter.POST("/notifications/inbox/read-batch", adaptHandler(operational.Notifications.MarkReadBatch))
 			apiRouter.POST("/notifications/inbox/read-all", adaptHandler(operational.Notifications.MarkAllRead))
 			apiRouter.POST("/notifications/inbox/read/delete", adaptHandler(operational.Notifications.DeleteRead))
 		}

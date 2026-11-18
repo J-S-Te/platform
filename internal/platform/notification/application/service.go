@@ -24,10 +24,11 @@ var (
 )
 
 const (
-	defaultPageSize  = 20
-	maximumPageSize  = 100
-	maximumRetrySize = 100
-	retryLease       = 2 * time.Minute
+	defaultPageSize      = 20
+	maximumPageSize      = 100
+	maximumRetrySize     = 100
+	maximumBatchReadSize = 100
+	retryLease           = 2 * time.Minute
 )
 
 // Service 暴露通知应用层的租户范围内用例。
@@ -255,12 +256,61 @@ func (service *Service) GetInboxItem(ctx context.Context, tenantID, userID, deli
 	return service.repository.GetInboxItem(ctx, strings.TrimSpace(tenantID), strings.TrimSpace(userID), strings.TrimSpace(deliveryID), service.clock.Now().UTC())
 }
 
-// CountUnread 返回当前认证收件人的已投递未读条数。
-func (service *Service) CountUnread(ctx context.Context, tenantID, userID string) (int64, error) {
+// CountUnread 返回当前认证收件人的已投递未读条数；source_application 过滤口径与收件箱列表完全一致，
+// 保证铃铛徽标与“本系统/跨系统”列表不会出现两个数。
+func (service *Service) CountUnread(ctx context.Context, tenantID, userID string, page PageRequest) (int64, error) {
 	if strings.TrimSpace(tenantID) == "" || strings.TrimSpace(userID) == "" {
 		return 0, ErrValidation
 	}
-	return service.repository.CountUnread(ctx, strings.TrimSpace(tenantID), strings.TrimSpace(userID), service.clock.Now().UTC())
+	if strings.TrimSpace(page.SourceApplication) != "" && strings.TrimSpace(page.ExcludeSourceApplication) != "" {
+		return 0, ErrValidation
+	}
+	return service.repository.CountUnread(ctx, strings.TrimSpace(tenantID), strings.TrimSpace(userID), normalizePage(page), service.clock.Now().UTC())
+}
+
+// UnreadBadge 聚合当前认证收件人的未读徽标；总量与分来源数量来自同一次可见性口径。
+func (service *Service) UnreadBadge(ctx context.Context, tenantID, userID string) (UnreadBadge, error) {
+	if strings.TrimSpace(tenantID) == "" || strings.TrimSpace(userID) == "" {
+		return UnreadBadge{}, ErrValidation
+	}
+	bySource, err := service.repository.CountUnreadBySource(ctx, strings.TrimSpace(tenantID), strings.TrimSpace(userID), service.clock.Now().UTC())
+	if err != nil {
+		return UnreadBadge{}, err
+	}
+	if bySource == nil {
+		bySource = []UnreadSource{}
+	}
+	var total int64
+	for _, item := range bySource {
+		total += item.UnreadCount
+	}
+	return UnreadBadge{Total: total, BySource: bySource}, nil
+}
+
+// MarkReadBatch 批量标记当前收件人自己的未读投递；空 ID、越权 ID 和重复 ID 都不会扩大更新范围。
+func (service *Service) MarkReadBatch(ctx context.Context, tenantID, userID string, deliveryIDs []string) (int64, error) {
+	tenantID = strings.TrimSpace(tenantID)
+	userID = strings.TrimSpace(userID)
+	if tenantID == "" || userID == "" || len(deliveryIDs) == 0 {
+		return 0, ErrValidation
+	}
+	ids := make([]string, 0, len(deliveryIDs))
+	seen := make(map[string]struct{}, len(deliveryIDs))
+	for _, id := range deliveryIDs {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			return 0, ErrValidation
+		}
+		if _, exists := seen[id]; exists {
+			continue
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	if len(ids) == 0 || len(ids) > maximumBatchReadSize {
+		return 0, ErrValidation
+	}
+	return service.repository.MarkReadBatch(ctx, tenantID, userID, ids, service.clock.Now().UTC())
 }
 
 // MarkRead 只更新当前收件人拥有且已投递的记录；重复已读操作保持幂等，不泄露其他用户的投递 ID。
@@ -288,6 +338,8 @@ func (service *Service) DeleteRead(ctx context.Context, tenantID, userID string)
 }
 
 func normalizePage(page PageRequest) PageRequest {
+	page.SourceApplication = strings.TrimSpace(page.SourceApplication)
+	page.ExcludeSourceApplication = strings.TrimSpace(page.ExcludeSourceApplication)
 	if page.Page < 1 {
 		page.Page = 1
 	}
