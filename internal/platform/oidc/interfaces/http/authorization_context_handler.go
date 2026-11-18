@@ -5,11 +5,14 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/J-S-Te/Basic-Platform/internal/authorizationrefresh"
+
 	oidcapplication "github.com/J-S-Te/Basic-Platform/internal/platform/oidc/application"
 )
 
-// AuthorizationContext 返回当前、应用范围的授权快照。它刻意在线且只可短缓存：
-// 权限与数据范围不复制进 OIDC token，撤销因此不必等待令牌过期，也无需超大 JWT。
+// AuthorizationContext 返回当前应用授权，显式刷新绕过旧快照。
+// 参数：w 为受控响应，r 为携带身份令牌的只读请求。
+// 返回值：无；认证、权限和依赖错误分别按既有协议响应。
 func (h *Handler) AuthorizationContext(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", http.MethodGet)
@@ -65,7 +68,8 @@ func (h *Handler) AuthorizationContext(w http.ResponseWriter, r *http.Request) {
 		writeContextUnauthorized(w)
 		return
 	}
-	context, err := h.authorizationContextResolver.ResolveOIDCAuthorizationContext(r.Context(), subjectTenantID, clientID, subjectID)
+	ctx := authorizationrefresh.FromRequest(r.Context(), r)
+	context, err := h.authorizationContextResolver.ResolveOIDCAuthorizationContext(ctx, subjectTenantID, clientID, subjectID)
 	if err != nil {
 		h.logger.Warn("OIDC authorization context resolution failed", "error", err, "client_id", clientID, "subject", subjectID)
 		if errors.Is(err, oidcapplication.ErrAccessDenied) {
