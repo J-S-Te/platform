@@ -386,9 +386,15 @@ func (repository *Repository) ListDeliveries(ctx context.Context, tenantID strin
 	return application.PageResult[domain.Delivery]{Items: items, Page: page.Page, PageSize: page.PageSize, Total: total}, nil
 }
 
+// inboxVisibility 是所有收件箱读路径共用的可见性口径：已送达、未软删、已到提醒时间。
+// 列表、未读计数与徽标聚合必须复用同一条件，避免铃铛与列表出现两个数。
+func (repository *Repository) inboxVisibility(ctx context.Context, tenantID, userID string, now time.Time) *gorm.DB {
+	return repository.database.WithContext(ctx).Table("notification_delivery AS d").Joins("JOIN notification_message AS m ON m.id = d.message_id AND m.tenant_id = d.tenant_id").Where("d.tenant_id = ? AND d.recipient_user_id = ? AND d.status = ? AND d.deleted_at IS NULL AND (d.remind_at IS NULL OR d.remind_at <= ?)", tenantID, userID, domain.DeliveryStatusDelivered, now)
+}
+
 // ListInbox 返回收件人可见（已送达且到提醒时间）的收件箱分页，可只看未读。
 func (repository *Repository) ListInbox(ctx context.Context, tenantID, userID string, page application.PageRequest, now time.Time) (application.PageResult[domain.InboxItem], error) {
-	base := repository.database.WithContext(ctx).Table("notification_delivery AS d").Joins("JOIN notification_message AS m ON m.id = d.message_id AND m.tenant_id = d.tenant_id").Where("d.tenant_id = ? AND d.recipient_user_id = ? AND d.status = ? AND d.deleted_at IS NULL AND (d.remind_at IS NULL OR d.remind_at <= ?)", tenantID, userID, domain.DeliveryStatusDelivered, now)
+	base := repository.inboxVisibility(ctx, tenantID, userID, now)
 	if page.UnreadOnly {
 		base = base.Where("d.read_at IS NULL")
 	}
@@ -418,17 +424,47 @@ func (repository *Repository) GetInboxItem(ctx context.Context, tenantID, userID
 	return repository.inboxItem(ctx, tenantID, userID, deliveryID, now)
 }
 
-// CountUnread 按与收件箱相同的可见性口径统计未读数；不使用已退役的物化计数表。
-func (repository *Repository) CountUnread(ctx context.Context, tenantID, userID string, now time.Time) (int64, error) {
+// CountUnread 按与收件箱列表相同的可见性和来源口径统计未读数；不使用已退役的物化计数表。
+func (repository *Repository) CountUnread(ctx context.Context, tenantID, userID string, page application.PageRequest, now time.Time) (int64, error) {
 	// 未读口径必须与收件箱可见性一致：remind_at 未到点的投递对收件人不存在。
 	// notification_user_stat 物化计数在延迟可见（DAILY/WEEKLY）下无法增量维护，
 	// 已随迁移 000113 退役，这里直接按 delivery 计数（索引覆盖，量级为个人收件箱）。
+	base := repository.inboxVisibility(ctx, tenantID, userID, now).Where("d.read_at IS NULL")
+	if source := strings.TrimSpace(page.SourceApplication); source != "" {
+		base = base.Where("m.source_application = ?", source)
+	}
+	if exclude := strings.TrimSpace(page.ExcludeSourceApplication); exclude != "" {
+		base = base.Where("m.source_application <> ?", exclude)
+	}
 	var total int64
-	err := repository.database.WithContext(ctx).Model(&deliveryModel{}).Where("tenant_id = ? AND recipient_user_id = ? AND status = ? AND read_at IS NULL AND deleted_at IS NULL AND (remind_at IS NULL OR remind_at <= ?)", tenantID, userID, domain.DeliveryStatusDelivered, now).Count(&total).Error
-	if err != nil {
+	if err := base.Count(&total).Error; err != nil {
 		return 0, fmt.Errorf("count unread notifications: %w", err)
 	}
 	return total, nil
+}
+
+// unreadSourceRow 是未读徽标按来源聚合的扫描行。
+type unreadSourceRow struct {
+	SourceApplication string `gorm:"column:source_application"`
+	UnreadCount       int64  `gorm:"column:unread_count"`
+}
+
+// CountUnreadBySource 返回当前收件人按来源系统分组的未读数，供一次徽标请求使用。
+func (repository *Repository) CountUnreadBySource(ctx context.Context, tenantID, userID string, now time.Time) ([]application.UnreadSource, error) {
+	var rows []unreadSourceRow
+	err := repository.inboxVisibility(ctx, tenantID, userID, now).Where("d.read_at IS NULL").
+		Select("m.source_application AS source_application, COUNT(*) AS unread_count").
+		Group("m.source_application").
+		Order("unread_count DESC, source_application ASC").
+		Scan(&rows).Error
+	if err != nil {
+		return nil, fmt.Errorf("count unread notifications by source: %w", err)
+	}
+	items := make([]application.UnreadSource, 0, len(rows))
+	for _, row := range rows {
+		items = append(items, application.UnreadSource{SourceApplication: row.SourceApplication, UnreadCount: row.UnreadCount})
+	}
+	return items, nil
 }
 
 // MarkRead 把收件人自己的一条可见未读投递标记为已读；已读操作幂等，
@@ -456,11 +492,27 @@ func (repository *Repository) MarkRead(ctx context.Context, tenantID, userID, de
 	return repository.inboxItem(ctx, tenantID, userID, deliveryID, now)
 }
 
+// MarkReadBatch 批量标记当前收件人自己的可见未读；不属于该用户的 ID 被静默忽略，
+// 返回实际更新条数，调用方不得把请求条数当成成功条数。
+func (repository *Repository) MarkReadBatch(ctx context.Context, tenantID, userID string, deliveryIDs []string, now time.Time) (int64, error) {
+	var affected int64
+	err := repository.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		result := tx.Model(&deliveryModel{}).Where("id IN ? AND tenant_id = ? AND recipient_user_id = ? AND status = ? AND read_at IS NULL AND deleted_at IS NULL AND (remind_at IS NULL OR remind_at <= ?)", deliveryIDs, tenantID, userID, domain.DeliveryStatusDelivered, now).Updates(map[string]any{"read_at": now, "updated_at": now})
+		if result.Error != nil {
+			return fmt.Errorf("mark notification batch read: %w", result.Error)
+		}
+		affected = result.RowsAffected
+		return nil
+	})
+	return affected, err
+}
+
 // MarkAllRead 一次性标记该收件人全部可见未读为已读，返回实际更新的条数。
+// deleted_at 必须与收件箱可见性一致，不能把用户已删除的已读记录重新算进已读操作。
 func (repository *Repository) MarkAllRead(ctx context.Context, tenantID, userID string, now time.Time) (int64, error) {
 	var affected int64
 	err := repository.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		result := tx.Model(&deliveryModel{}).Where("tenant_id = ? AND recipient_user_id = ? AND status = ? AND read_at IS NULL AND (remind_at IS NULL OR remind_at <= ?)", tenantID, userID, domain.DeliveryStatusDelivered, now).Updates(map[string]any{"read_at": now, "updated_at": now})
+		result := tx.Model(&deliveryModel{}).Where("tenant_id = ? AND recipient_user_id = ? AND status = ? AND read_at IS NULL AND deleted_at IS NULL AND (remind_at IS NULL OR remind_at <= ?)", tenantID, userID, domain.DeliveryStatusDelivered, now).Updates(map[string]any{"read_at": now, "updated_at": now})
 		if result.Error != nil {
 			return fmt.Errorf("mark all notifications read: %w", result.Error)
 		}

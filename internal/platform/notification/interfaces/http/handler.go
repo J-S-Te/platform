@@ -262,9 +262,7 @@ func (h *Handler) ListInbox(w http.ResponseWriter, r *http.Request) {
 		}
 		page.UnreadOnly = unreadOnly
 	}
-	page.SourceApplication = strings.TrimSpace(r.URL.Query().Get("source_application"))
-	page.ExcludeSourceApplication = strings.TrimSpace(r.URL.Query().Get("exclude_source_application"))
-	if (page.SourceApplication != "" && page.ExcludeSourceApplication != "") || len(page.SourceApplication) > 64 || len(page.ExcludeSourceApplication) > 64 {
+	if !applyInboxSource(r, &page) {
 		h.writeError(w, r, app.ErrValidation)
 		return
 	}
@@ -290,18 +288,61 @@ func (h *Handler) GetInboxItem(w http.ResponseWriter, r *http.Request) {
 	httpresponse.WriteSuccess(w, r, http.StatusOK, "站内信详情查询成功", out)
 }
 
-// UnreadCount 返回当前用户按收件箱可见性口径统计的未读数量。
+// UnreadCount 返回当前用户按收件箱可见性与来源口径统计的未读数量。
+// 过滤参数必须和 ListInbox 完全一致，否则“本系统”徽标与列表会长期漂移。
 func (h *Handler) UnreadCount(w http.ResponseWriter, r *http.Request) {
 	p, ok := h.principal(w, r)
 	if !ok {
 		return
 	}
-	out, e := h.service.CountUnread(r.Context(), p.Tenant.ID, p.User.ID)
+	page := pagination(r)
+	if !applyInboxSource(r, &page) {
+		h.writeError(w, r, app.ErrValidation)
+		return
+	}
+	out, e := h.service.CountUnread(r.Context(), p.Tenant.ID, p.User.ID, page)
 	if e != nil {
 		h.writeError(w, r, e)
 		return
 	}
 	httpresponse.WriteSuccess(w, r, http.StatusOK, "未读站内信数量查询成功", map[string]int64{"unread_count": out})
+}
+
+// UnreadBadge 一次返回未读总数与分来源数量，供统一铃铛与工作台聚合。
+func (h *Handler) UnreadBadge(w http.ResponseWriter, r *http.Request) {
+	p, ok := h.principal(w, r)
+	if !ok {
+		return
+	}
+	out, e := h.service.UnreadBadge(r.Context(), p.Tenant.ID, p.User.ID)
+	if e != nil {
+		h.writeError(w, r, e)
+		return
+	}
+	httpresponse.WriteSuccess(w, r, http.StatusOK, "未读站内信徽标查询成功", out)
+}
+
+// batchReadPayload 是批量已读请求体；上限由应用层统一校验。
+type batchReadPayload struct {
+	DeliveryIDs []string `json:"delivery_ids"`
+}
+
+// MarkReadBatch 批量标记当前用户自己的未读站内信，返回实际更新条数。
+func (h *Handler) MarkReadBatch(w http.ResponseWriter, r *http.Request) {
+	p, ok := h.principal(w, r)
+	if !ok {
+		return
+	}
+	var v batchReadPayload
+	if !decode(w, r, &v) {
+		return
+	}
+	out, e := h.service.MarkReadBatch(r.Context(), p.Tenant.ID, p.User.ID, v.DeliveryIDs)
+	if e != nil {
+		h.writeError(w, r, e)
+		return
+	}
+	httpresponse.WriteSuccess(w, r, http.StatusOK, "站内信已批量标记为已读", map[string]int64{"updated_count": out})
 }
 
 // MarkRead 标记当前用户一条站内信为已读；操作幂等。
@@ -435,6 +476,16 @@ func pagination(r *http.Request) app.PageRequest {
 	p, _ := positive(r.URL.Query().Get("page"), 1)
 	s, _ := positive(r.URL.Query().Get("page_size"), 20)
 	return app.PageRequest{Page: p, PageSize: s}
+}
+
+// applyInboxSource 解析列表与未读计数共用的来源过滤；两个参数互斥，长度上限 64。
+func applyInboxSource(r *http.Request, page *app.PageRequest) bool {
+	page.SourceApplication = strings.TrimSpace(r.URL.Query().Get("source_application"))
+	page.ExcludeSourceApplication = strings.TrimSpace(r.URL.Query().Get("exclude_source_application"))
+	if (page.SourceApplication != "" && page.ExcludeSourceApplication != "") || len(page.SourceApplication) > 64 || len(page.ExcludeSourceApplication) > 64 {
+		return false
+	}
+	return true
 }
 func positive(raw string, fallback int) (int, error) {
 	if strings.TrimSpace(raw) == "" {

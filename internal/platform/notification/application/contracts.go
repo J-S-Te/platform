@@ -62,6 +62,18 @@ type PageResult[T any] struct {
 	Total    int64 `json:"total"`
 }
 
+// UnreadSource 是未读徽标按来源系统的聚合项；history 消息来源为空时归入空字符串。
+type UnreadSource struct {
+	SourceApplication string `json:"source_application"`
+	UnreadCount       int64  `json:"unread_count"`
+}
+
+// UnreadBadge 是收件箱徽标的一次性聚合结果，官方口径与收件箱列表、未读计数保持一致。
+type UnreadBadge struct {
+	Total    int64          `json:"total"`
+	BySource []UnreadSource `json:"by_source"`
+}
+
 // CreateTemplateInput 创建启用或停用的模板及其首个不可变版本。
 type CreateTemplateInput struct {
 	TenantID      string
@@ -158,8 +170,10 @@ type Repository interface {
 
 	ListInbox(ctx context.Context, tenantID, userID string, page PageRequest, now time.Time) (PageResult[domain.InboxItem], error)
 	GetInboxItem(ctx context.Context, tenantID, userID, deliveryID string, now time.Time) (domain.InboxItem, error)
-	CountUnread(ctx context.Context, tenantID, userID string, now time.Time) (int64, error)
+	CountUnread(ctx context.Context, tenantID, userID string, page PageRequest, now time.Time) (int64, error)
+	CountUnreadBySource(ctx context.Context, tenantID, userID string, now time.Time) ([]UnreadSource, error)
 	MarkRead(ctx context.Context, tenantID, userID, deliveryID string, now time.Time) (domain.InboxItem, error)
+	MarkReadBatch(ctx context.Context, tenantID, userID string, deliveryIDs []string, now time.Time) (int64, error)
 	MarkAllRead(ctx context.Context, tenantID, userID string, now time.Time) (int64, error)
 	DeleteReadInbox(ctx context.Context, tenantID, userID string, now time.Time) (int64, error)
 
