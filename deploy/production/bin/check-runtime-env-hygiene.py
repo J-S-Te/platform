@@ -65,7 +65,7 @@ NON_RELEASE_COMPOSE_FILES = ("compose.production.yaml", "compose.yaml")
 # 子系统应用编码 -> 该子系统的 runtime 环境文件（--apps 过滤用）。
 APPLICATIONS = {
     "contract_management": ("contract.env",),
-    "customer_and_opportunity": ("customer.env",),
+    "customer_and_opportunity": ("customer.env", "customer-project-history.env"),
     "customer_portal": ("portal.env", "portal-report-worker.env"),
     "project_management": ("project.env",),
     "settlement": ("settlement.env",),

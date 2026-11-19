@@ -8,7 +8,7 @@ import (
 	"github.com/J-S-Te/Basic-Platform/internal/platform/applicationregistry/application"
 )
 
-// initializeInheritedRuntimeExtensions 用途：升级时从审核模板补建新增的继承式 Worker 配置。
+// initializeInheritedRuntimeExtensions 用途：升级时从审核模板补建新增的运行配置。
 // 参数：input 为受控更新输入，仅用于核对目标；调用方必须持有发布锁。
 // 返回值：缺失源配置、模板或不安全路径返回错误；不重建应用主配置和既有秘密。
 func (target *productionComposeTarget) initializeInheritedRuntimeExtensions(input application.SubsystemProvisioningInput) error {
@@ -21,6 +21,13 @@ func (target *productionComposeTarget) initializeInheritedRuntimeExtensions(inpu
 	}
 	files := target.selectedRuntimeFiles()
 	for _, file := range files {
+		if input.ApplicationCode == integratedCustomerApplicationCode &&
+			file.Path == productionCRMProjectHistoryRuntimePath {
+			if err := ensureProductionRuntimeFile(root, file, true); err != nil {
+				return err
+			}
+			continue
+		}
 		if file.InheritFrom == "" || len(file.InheritKeys) == 0 || len(file.RequiredExistingKeys) > 0 {
 			continue
 		}

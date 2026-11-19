@@ -3,6 +3,7 @@ package infrastructure
 import (
 	"context"
 	"encoding/json"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -35,6 +36,9 @@ func (target *productionComposeTarget) deployAndRefreshLocked(ctx context.Contex
 	return target.refreshRuntimeConsumers(ctx)
 }
 
+// refreshRuntimeConsumers 按已选配置刷新仍在运行的跨应用消费者。
+// 参数：ctx 为持有发布锁的操作上下文。
+// 返回值：归属核对或消费者重载失败时返回脱敏错误。
 func (target *productionComposeTarget) refreshRuntimeConsumers(ctx context.Context) (result error) {
 	current := make(map[string]bool)
 	for _, service := range target.selectedRuntimeServices() {
@@ -45,6 +49,10 @@ func (target *productionComposeTarget) refreshRuntimeConsumers(ctx context.Conte
 	// 仍拿着旧秘密。
 	for _, file := range target.selectedRuntimeFiles() {
 		for _, service := range target.config.RuntimeConsumers[file.Path] {
+			if target.config.Profile.Manifest.Application.Code == integratedCustomerApplicationCode &&
+				service == "portal-invite-compensation-worker" && !runtimeManagesPortalCompensation(file) {
+				continue
+			}
 			if !current[service] && target.enabledServices[service] {
 				candidates[service] = true
 			}
@@ -144,4 +152,16 @@ func (target *productionComposeTarget) refreshRuntimeConsumers(ctx context.Conte
 		return provisioningError("runtime consumer refresh failed; controlled retry required")
 	}
 	return nil
+}
+
+// runtimeManagesPortalCompensation 判断发布清单是否交付邀请补偿进程的配置。
+// 参数：file 为发布目标选中的共享运行文件清单。
+// 返回值：清单管理邀请补偿或身份对账配置时为真。
+func runtimeManagesPortalCompensation(file productionSubsystemRuntimeFileManifest) bool {
+	keys := slices.Concat(slices.Collect(maps.Keys(file.Values)), slices.Collect(maps.Keys(file.Bindings)),
+		file.GeneratedKeys, file.InheritKeys)
+	return slices.ContainsFunc(keys, func(key string) bool {
+		return strings.HasPrefix(key, "PORTAL_INVITE_COMPENSATION_") ||
+			strings.HasPrefix(key, "PORTAL_IDENTITY_RECONCILIATION_")
+	})
 }

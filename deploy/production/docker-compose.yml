@@ -1154,6 +1154,8 @@ services:
     env_file:
       - path: ${CUSTOMER_RUNTIME_ENV_FILE:-runtime/customer.env}
         required: false
+      - path: ${CUSTOMER_PROJECT_HISTORY_RUNTIME_ENV_FILE:-runtime/customer-project-history.env}
+        required: false
       - path: runtime/license-customer-api.env
         required: false
     # OIDC_* 由此应用和环境专属的 runtime/customer.env 管理。Compose 不得提供全局 Keycloak 默认值，
