@@ -3,6 +3,9 @@ package securityevent
 import (
 	"net/http"
 	"time"
+
+	"github.com/J-S-Te/Basic-Platform/internal/shared/httperror"
+	"github.com/J-S-Te/Basic-Platform/internal/shared/httpresponse"
 )
 
 type coverageRow struct {
@@ -16,9 +19,13 @@ type coverageRow struct {
 	OutboxOldestAt      *time.Time `json:"outbox_oldest_at"`
 }
 
+// Coverage 汇总平台已接收的审计、安全事件及各应用的上报状态。
+// 参数：w 为响应写入器，r 提供查询上下文及请求编号。
+// 返回值：无；返回覆盖度数据，聚合依赖失败时返回可诊断的错误。
 func (h *Handler) Coverage(w http.ResponseWriter, r *http.Request) {
 	if h == nil || h.store == nil || h.store.DB == nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "security_event_unavailable"})
+		httpresponse.WriteError(w, r, http.StatusServiceUnavailable,
+			httperror.New("AUDIT_COVERAGE_UNAVAILABLE", "审计覆盖度暂不可用", nil))
 		return
 	}
 	since := time.Now().UTC().Add(-24 * time.Hour)
@@ -28,9 +35,15 @@ func (h *Handler) Coverage(w http.ResponseWriter, r *http.Request) {
 		Events24h       int64
 	}
 	var audits []auditAgg
-	if err := h.store.DB.WithContext(r.Context()).Raw("SELECT application_code, MAX(occurred_at) AS last_event_at, SUM(CASE WHEN occurred_at >= ? THEN 1 ELSE 0 END) AS events_24h FROM audit_event GROUP BY application_code", since).Scan(&audits).Error; err != nil {
+	const auditCoverageQuery = `SELECT app.code AS application_code, MAX(event.occurred_at) AS last_event_at,
+		SUM(CASE WHEN event.occurred_at >= ? THEN 1 ELSE 0 END) AS events_24h
+		FROM audit_event AS event
+		JOIN platform_application AS app ON app.id = event.application_id AND app.tenant_id = event.tenant_id
+		GROUP BY app.code`
+	if err := h.store.DB.WithContext(r.Context()).Raw(auditCoverageQuery, since).Scan(&audits).Error; err != nil {
 		h.logger.Error("audit coverage query failed", "error", err)
-		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "audit_coverage_unavailable"})
+		httpresponse.WriteError(w, r, http.StatusServiceUnavailable,
+			httperror.New("AUDIT_COVERAGE_UNAVAILABLE", "审计覆盖度暂不可用", nil))
 		return
 	}
 	type securityAgg struct {
@@ -41,7 +54,8 @@ func (h *Handler) Coverage(w http.ResponseWriter, r *http.Request) {
 	var securities []securityAgg
 	if err := h.store.DB.WithContext(r.Context()).Raw("SELECT application_code, MAX(occurred_at) AS last_event_at, SUM(CASE WHEN occurred_at >= ? THEN 1 ELSE 0 END) AS events_24h FROM platform_security_event GROUP BY application_code", since).Scan(&securities).Error; err != nil {
 		h.logger.Error("security coverage query failed", "error", err)
-		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "security_coverage_unavailable"})
+		httpresponse.WriteError(w, r, http.StatusServiceUnavailable,
+			httperror.New("SECURITY_COVERAGE_UNAVAILABLE", "安全事件覆盖度暂不可用", nil))
 		return
 	}
 	rows := make(map[string]*coverageRow)
@@ -71,5 +85,8 @@ func (h *Handler) Coverage(w http.ResponseWriter, r *http.Request) {
 	for _, row := range rows {
 		items = append(items, *row)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": items, "generated_at": time.Now().UTC(), "outbox_available": len(health) > 0, "note": "outbox 快照由各子系统 worker 周期上报；未上报时字段为 null。"})
+	httpresponse.WriteSuccess(w, r, http.StatusOK, "审计覆盖度查询成功", map[string]any{
+		"items": items, "generated_at": time.Now().UTC(), "outbox_available": len(health) > 0,
+		"note": "outbox 快照由各子系统 worker 周期上报；未上报时字段为 null。",
+	})
 }

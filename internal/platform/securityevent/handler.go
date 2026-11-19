@@ -14,6 +14,8 @@ import (
 	"encoding/json"
 
 	"github.com/J-S-Te/Basic-Platform/internal/shared/appctx"
+	"github.com/J-S-Te/Basic-Platform/internal/shared/httperror"
+	"github.com/J-S-Te/Basic-Platform/internal/shared/httpresponse"
 )
 
 const (
@@ -154,6 +156,8 @@ func (h *Handler) eventFromRequest(principal appctx.Principal, payload ingestReq
 }
 
 // List 返回全局安全事件；路由层已要求 platform:audit:view，不做租户过滤。
+// 参数：w 为响应写入器，r 携带只读查询范围和分页。
+// 返回值：无；返回统一信封的分页数据或带请求编号的错误。
 func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 	query := Query{
 		ApplicationCode: strings.TrimSpace(r.URL.Query().Get("application_code")),
@@ -164,7 +168,8 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 	if value := strings.TrimSpace(r.URL.Query().Get("occurred_from")); value != "" {
 		parsed, err := time.Parse(time.RFC3339, value)
 		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_occurred_from"})
+			httpresponse.WriteError(w, r, http.StatusBadRequest,
+				httperror.New("INVALID_OCCURRED_FROM", "开始时间格式无效", nil))
 			return
 		}
 		query.OccurredFrom = &parsed
@@ -172,7 +177,8 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 	if value := strings.TrimSpace(r.URL.Query().Get("occurred_to")); value != "" {
 		parsed, err := time.Parse(time.RFC3339, value)
 		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_occurred_to"})
+			httpresponse.WriteError(w, r, http.StatusBadRequest,
+				httperror.New("INVALID_OCCURRED_TO", "结束时间格式无效", nil))
 			return
 		}
 		query.OccurredTo = &parsed
@@ -180,10 +186,13 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 	items, total, err := h.store.List(r.Context(), query)
 	if err != nil {
 		h.logger.Error("list security events", "error", err)
-		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "security_event_unavailable"})
+		httpresponse.WriteError(w, r, http.StatusServiceUnavailable,
+			httperror.New("SECURITY_EVENT_UNAVAILABLE", "全局安全事件暂不可用", nil))
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": items, "total": total, "page": query.Page, "page_size": query.PageSize})
+	httpresponse.WriteSuccess(w, r, http.StatusOK, "全局安全事件查询成功", map[string]any{
+		"items": items, "total": total, "page": query.Page, "page_size": query.PageSize,
+	})
 }
 
 var (

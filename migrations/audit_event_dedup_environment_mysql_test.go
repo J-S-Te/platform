@@ -3,6 +3,12 @@ package migrations_test
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"testing"
 	"time"
@@ -10,7 +16,12 @@ import (
 	"github.com/J-S-Te/Basic-Platform/internal/migration"
 	auditapplication "github.com/J-S-Te/Basic-Platform/internal/platform/audit/application"
 	auditinfrastructure "github.com/J-S-Te/Basic-Platform/internal/platform/audit/infrastructure"
+	audithttp "github.com/J-S-Te/Basic-Platform/internal/platform/audit/interfaces/http"
+	"github.com/J-S-Te/Basic-Platform/internal/platform/securityevent"
+	"github.com/J-S-Te/Basic-Platform/internal/shared/authctx"
+	"github.com/J-S-Te/Basic-Platform/internal/transport/http/middleware"
 	"github.com/J-S-Te/Basic-Platform/migrations"
+	"github.com/gin-gonic/gin"
 	gomysql "github.com/go-sql-driver/mysql"
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
@@ -68,6 +79,8 @@ func TestAuditEventDedupEnvironmentMySQL(t *testing.T) {
 		"INSERT INTO platform_application (id, tenant_id, code, name, application_type, status, created_at) VALUES ('app-1', 'tenant-1', 'platform', '平台', 'CORE', 'ACTIVE', NOW(3))",
 		"INSERT INTO platform_application_environment (id, application_id, environment, status) VALUES ('env-1', 'app-1', 'dev', 'ACTIVE')",
 		"INSERT INTO platform_application_environment (id, application_id, environment, status) VALUES ('env-2', 'app-1', 'prod', 'ACTIVE')",
+		"INSERT INTO platform_application_environment (id, application_id, environment, status) VALUES ('env-3', 'app-1', 'test', 'ACTIVE')",
+		"CREATE TABLE audit_dead_letter (tenant_id CHAR(26) NOT NULL, status VARCHAR(32) NOT NULL)",
 	}
 	for _, statement := range ddl {
 		if _, err := raw.Exec(statement); err != nil {
@@ -232,5 +245,145 @@ func TestAuditEventDedupEnvironmentMySQL(t *testing.T) {
 	}
 	if accepted != 2 {
 		t.Fatalf("cross-environment persisted events = %d, want 2", accepted)
+	}
+
+	t.Run("concurrent_same_source", func(t *testing.T) {
+		testConcurrentAuditReadEvents(t, raw, service, eventInput("prod"))
+	})
+	t.Run("concurrent_audited_queries", func(t *testing.T) {
+		testConcurrentAuditedQueries(t, service)
+	})
+	for _, version := range []uint64{144, 145} {
+		applyMigrationVersion(version)
+	}
+	t.Run("security_events_envelope", func(t *testing.T) {
+		testSecurityEventQueries(t, gormDB)
+	})
+}
+
+// testConcurrentAuditReadEvents 验证同一审计来源的并发读取留痕均能入链。
+// 参数：t 为测试上下文，raw 为隔离数据库，service 为实际审计服务，input 为事件模板。
+// 返回值：无；有事件被拒绝或链序号不连续时测试失败。
+func testConcurrentAuditReadEvents(t *testing.T, raw *sql.DB, service *auditapplication.Service, input auditapplication.EventInput) {
+	t.Helper()
+	const requests = 24
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	start := make(chan struct{})
+	results := make(chan error, requests)
+	for index := range requests {
+		event := input
+		event.EventID = fmt.Sprintf("zzz-concurrent-%02d", index)
+		go func() {
+			<-start
+			receipt, err := service.Ingest(ctx, "tenant-1", event)
+			if err == nil && receipt.Status != "ACCEPTED" {
+				err = fmt.Errorf("unexpected audit receipt status %q", receipt.Status)
+			}
+			results <- err
+		}()
+	}
+	close(start)
+	for range requests {
+		if err := <-results; err != nil {
+			t.Error(err)
+		}
+	}
+	var rows, sequences uint64
+	err := raw.QueryRowContext(ctx, "SELECT COUNT(*), COUNT(DISTINCT chain_sequence) FROM audit_event WHERE environment_id = 'env-2' AND event_id LIKE 'zzz-concurrent-%'").Scan(&rows, &sequences)
+	if err != nil || rows != requests || sequences != requests {
+		t.Fatalf("concurrent audit rows=%d unique sequences=%d, want %d; err=%v", rows, sequences, requests, err)
+	}
+}
+
+// testConcurrentAuditedQueries 验证访问审计列表和摄取健康的同时能完成首次建链。
+// 参数：t 为测试上下文，service 为实际隔离数据库上的审计服务。
+// 返回值：无；任何请求未成功或意图和结果未成对入链时测试失败。
+func testConcurrentAuditedQueries(t *testing.T, service *auditapplication.Service) {
+	t.Helper()
+	t.Setenv("PLATFORM_AUDIT_REQUIRED", "true")
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	handler, err := audithttp.NewHandler(service, logger, t.TempDir(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	router := gin.New()
+	router.Use(middleware.AuditTrail(service, logger, middleware.AuditSource{
+		ApplicationCode: "platform", EnvironmentCode: "test",
+	}))
+	const permission = "platform:audit:view"
+	router.GET("/api/v1/audit/events", middleware.RequirePermission(permission), gin.WrapF(handler.ListEvents))
+	router.GET("/api/v1/audit/ingestion-health", middleware.RequirePermission(permission), gin.WrapF(handler.IngestionHealth))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	principal := authctx.Principal{
+		Tenant:          authctx.ReferenceName{ID: "tenant-1"},
+		User:            authctx.ReferenceName{ID: "user-1"},
+		PermissionCodes: []string{permission},
+	}
+	const requests = 8
+	start := make(chan struct{})
+	results := make(chan int, requests)
+	paths := []string{"/api/v1/audit/events", "/api/v1/audit/ingestion-health"}
+	for index := range requests {
+		request := httptest.NewRequest(http.MethodGet, paths[index%len(paths)], nil).
+			WithContext(authctx.WithPrincipal(ctx, principal))
+		go func() {
+			<-start
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, request)
+			results <- response.Code
+		}()
+	}
+	close(start)
+	for range requests {
+		if code := <-results; code != http.StatusOK {
+			t.Errorf("concurrent audit query: status=%d, want 200", code)
+		}
+	}
+	chain, err := service.VerifyEventChain(ctx, "tenant-1", "platform", "test", 1, 30)
+	if err != nil || !chain.Verified || chain.CheckedRows != requests*2 {
+		t.Fatalf("concurrent audit chain: %+v; err=%v", chain, err)
+	}
+}
+
+// testSecurityEventQueries 验证真实数据库上的全局事件与覆盖度能被平台客户端读取。
+// 参数：t 为测试上下文，database 为已执行审计迁移的隔离数据库。
+// 返回值：无；列表、来源统计或响应信封不符时测试失败。
+func testSecurityEventQueries(t *testing.T, database *gorm.DB) {
+	t.Helper()
+	store := securityevent.NewStore(database)
+	handler, err := securityevent.NewHandler(store, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = store.Record(context.Background(), securityevent.Event{
+		EventID: "security-fixture", ApplicationCode: "platform", EnvironmentCode: "prod",
+		Action: "AUTHENTICATION_DENIED", Method: "POST", Path: "/fixture", Result: "DENIED",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, query := range []struct {
+		path   string
+		handle http.HandlerFunc
+	}{{"/security-events?page=1&page_size=1", handler.List}, {"/audit/coverage", handler.Coverage}} {
+		recorder := httptest.NewRecorder()
+		query.handle.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, query.path, nil))
+		var body struct {
+			Code string `json:"code"`
+			Data struct {
+				Items []struct {
+					ApplicationCode string `json:"application_code"`
+				} `json:"items"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		if recorder.Code != http.StatusOK || body.Code != "OK" || len(body.Data.Items) != 1 || body.Data.Items[0].ApplicationCode != "platform" {
+			t.Errorf("%s: status=%d body=%s", query.path, recorder.Code, recorder.Body)
+		}
 	}
 }
