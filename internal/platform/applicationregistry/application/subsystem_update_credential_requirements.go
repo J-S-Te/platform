@@ -48,6 +48,7 @@ func SubsystemUpdateServiceCredentialRequirements(applicationCode string) []Subs
 		// notification_ingest 能力，也可能持有交付给其他环境的凭据，
 		// 因此每次受控更新都必须轮换并把两个值随环境文件原子重新下发。
 		return []SubsystemUpdateServiceCredentialRequirement{
+			{Purpose: ServiceCredentialCRMProjectHistoryRead, Suffix: "crm-project-history", ClientName: "CRM 项目历史摘要读取", Scopes: []string{"crm.project_history.read"}, Rotate: true},
 			{Purpose: ServiceCredentialAuditIngest, Suffix: "audit-publisher", ClientName: "客户与商机管理系统 Audit Publisher", Scopes: []string{"audit.ingest"}, Rotate: true},
 			{Purpose: ServiceCredentialNotificationIngest, Suffix: "notification-publisher", ClientName: "客户与商机管理系统 Notification Publisher", Scopes: []string{"notification.ingest"}, Rotate: true},
 			{Purpose: ServiceCredentialContractSummaryRead, Suffix: "contract-summary", ClientName: "客户与商机管理系统 Contract Summary Reader", Scopes: []string{"contract.summary.read"}, Rotate: true},

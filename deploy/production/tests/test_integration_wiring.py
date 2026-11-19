@@ -74,6 +74,7 @@ UPDATE_CREDENTIAL_SUFFIXES = {
         "opportunity-intake",
         "owner-directory",
         "contract-signed-count",
+        "crm-project-history",
         FILE_GATEWAY_SUFFIX,
     ),
     "customer_portal": (

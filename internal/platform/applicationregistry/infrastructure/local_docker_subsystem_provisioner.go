@@ -687,6 +687,9 @@ func (provisioner *LocalDockerSubsystemProvisioner) updateServiceCredentialRunti
 		if err := customerContractIdentityRuntimeValues(input, values); err != nil {
 			return err
 		}
+		if err := customerCRMProjectHistoryRuntimeValues(input, values); err != nil {
+			return err
+		}
 		// 附件写入文件网关：随受控更新与凭据原子交付。历史环境从未写入这些键，
 		// CRM 附件一直停在 legacy 模式（能力关闭）。
 		if credential, ok := input.ServiceCredential(application.ServiceCredentialFileGatewayWrite); ok &&
@@ -699,6 +702,7 @@ func (provisioner *LocalDockerSubsystemProvisioner) updateServiceCredentialRunti
 			values["ATTACHMENT_FILE_GATEWAY_CLIENT_SECRET"] = credential.PlaintextSecret
 		}
 	case integratedProjectApplicationCode:
+		projectCRMProjectHistoryRuntimeValues(input.Environment, values)
 		// 受控更新会轮换项目审计发布者密钥；更新路径必须把新 client/secret 写回运行文件，
 		// 否则项目继续用旧 secret 调用平台审计入口并持续 401。首次接入由 applyLocked 下发，
 		// 这里补齐更新路径，保持两条路径一致。
@@ -1252,8 +1256,12 @@ func (provisioner *LocalDockerSubsystemProvisioner) applyLocked(ctx context.Cont
 		if err := customerContractIdentityRuntimeValues(input, values); err != nil {
 			return err
 		}
+		if err := customerCRMProjectHistoryRuntimeValues(input, values); err != nil {
+			return err
+		}
 	}
 	if input.ApplicationCode == integratedProjectApplicationCode {
+		projectCRMProjectHistoryRuntimeValues(input.Environment, values)
 		if err := projectNotificationRuntimeValues(input, values); err != nil {
 			return err
 		}

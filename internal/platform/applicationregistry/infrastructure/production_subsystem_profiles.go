@@ -582,6 +582,7 @@ func hardcodedProductionServiceBindingPurposes(applicationCode string) []string 
 	case "customer_and_opportunity":
 		return []string{
 			application.ServiceCredentialOwnerDirectoryRead,
+			application.ServiceCredentialCRMProjectHistoryRead,
 			application.ServiceCredentialContractSummaryRead,
 			application.ServiceCredentialContractOpportunitySignedWrite,
 			application.ServiceCredentialContractOpportunitySignedCountRead,
