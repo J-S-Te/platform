@@ -137,11 +137,11 @@ func TestProductionSubsystemProfilesProvidePortableDatabaseDSNs(t *testing.T) {
 			"MYSQL_DSN": "contract:${CONTRACT_MYSQL_PASSWORD}@tcp(contract-mysql:3306)/contract_management?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci",
 		},
 		"customer_and_opportunity": {
-			"MYSQL_DSN":                            "customer:${CUSTOMER_MYSQL_PASSWORD}@tcp(customer-mysql:3306)/customer_opportunity?charset=utf8mb4&parseTime=true&loc=UTC&multiStatements=true",
-			"PORTAL_INVITE_COMPENSATION_MYSQL_DSN": "customer:${CUSTOMER_MYSQL_PASSWORD}@tcp(customer-mysql:3306)/customer_opportunity?charset=utf8mb4&parseTime=true&loc=UTC&multiStatements=true",
+			"MYSQL_DSN": "customer:${CUSTOMER_MYSQL_PASSWORD}@tcp(customer-mysql:3306)/customer_opportunity?charset=utf8mb4&parseTime=true&loc=UTC&multiStatements=true",
 		},
 		"customer_portal": {
-			"PORTAL_MYSQL_DSN": "portal:${PORTAL_MYSQL_PASSWORD}@tcp(portal-mysql:3306)/customer_portal?charset=utf8mb4&parseTime=true&loc=UTC&multiStatements=true",
+			"PORTAL_MYSQL_DSN":                     "portal:${PORTAL_MYSQL_PASSWORD}@tcp(portal-mysql:3306)/customer_portal?charset=utf8mb4&parseTime=true&loc=UTC&multiStatements=true",
+			"PORTAL_INVITE_COMPENSATION_MYSQL_DSN": "customer:${CUSTOMER_MYSQL_PASSWORD}@tcp(customer-mysql:3306)/customer_opportunity?charset=utf8mb4&parseTime=true&loc=UTC&multiStatements=true",
 		},
 		"data_analysis": {
 			"DASHBOARD_MYSQL_DSN": "dashboard:${DASHBOARD_MYSQL_PASSWORD}@tcp(data-analysis-mysql:3306)/dashboard_aggregation?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci",

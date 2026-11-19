@@ -6,6 +6,8 @@ import (
 	"github.com/J-S-Te/Basic-Platform/internal/platform/applicationregistry/application"
 )
 
+const productionCRMProjectHistoryRuntimePath = "runtime/customer-project-history.env"
+
 // customerCRMProjectHistoryRuntimeValues 交付本地 CRM 使用的项目历史专用凭据。
 // 参数：input 为受控接入或更新数据，values 为待写入的运行配置。
 // 返回值：已提供的凭据不完整或串环境时返回错误。

@@ -133,6 +133,7 @@ runtime:
         - SENSITIVE_HMAC_KEY_BASE64
         - PORTAL_INVITE_PEPPER_BASE64
       values:
+        PORTAL_INVITE_COMPENSATION_MYSQL_DSN: 'customer:${CUSTOMER_MYSQL_PASSWORD}@tcp(customer-mysql:3306)/customer_opportunity?charset=utf8mb4&parseTime=true&loc=UTC&multiStatements=true'
         PORTAL_INVITE_ENABLED: "true"
         PORTAL_PROVISION_URL: http://portal-api:8091/customer-portal/internal/accounts/provision
         PORTAL_PROVISION_TOKEN_URL: http://platform-api:8080/oauth2/token
