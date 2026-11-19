@@ -639,21 +639,36 @@ func NewWorker(cfg config.Config) (*Worker, error) {
 			}
 			synchronizer.SetFailureNotifier(failureNotifier)
 		}
-		keycloakRunner, err := keycloakauthorizationworker.New(queue, synchronizer, logger, cfg.Worker.ID+"-keycloak", cfg.Worker.PollInterval)
-		if err != nil {
-			_ = database.Close(db)
-			_ = logFile.Close()
-			return nil, err
-		}
-		keycloakRunner.StaleLockTimeout = cfg.Worker.StaleLockTimeout
 		eligibilityReconciler, err := keycloakauthorizationinfrastructure.NewAccountEligibilityReconciler(db)
 		if err != nil {
 			_ = database.Close(db)
 			_ = logFile.Close()
 			return nil, err
 		}
-		keycloakRunner.SetEligibilityReconciler(eligibilityReconciler)
-		runners = append(runners, keycloakRunner)
+		// 一个岗位变更会按“用户 × 应用 × 环境”扇出多条投影事件；单 worker 每轮只领取
+		// 一条，用户多时会形成分钟级排队。Claim 使用 SKIP LOCKED，可安全地并发多个副本；
+		// 资格对账是幂等补偿，只挂在第一个副本上，避免重复扫描。
+		projectionWorkers := cfg.Keycloak.ProjectionWorkers
+		if projectionWorkers <= 0 {
+			projectionWorkers = 1
+		}
+		for index := 0; index < projectionWorkers; index++ {
+			workerID := cfg.Worker.ID + "-keycloak"
+			if projectionWorkers > 1 {
+				workerID = fmt.Sprintf("%s-keycloak-%d", cfg.Worker.ID, index+1)
+			}
+			keycloakRunner, runnerErr := keycloakauthorizationworker.New(queue, synchronizer, logger, workerID, cfg.Worker.PollInterval)
+			if runnerErr != nil {
+				_ = database.Close(db)
+				_ = logFile.Close()
+				return nil, runnerErr
+			}
+			keycloakRunner.StaleLockTimeout = cfg.Worker.StaleLockTimeout
+			if index == 0 {
+				keycloakRunner.SetEligibilityReconciler(eligibilityReconciler)
+			}
+			runners = append(runners, keycloakRunner)
+		}
 		// 平台审计轨迹不需要 Keycloak 安装自定义监听插件：worker 以小幅幂等重叠
 		// 轮询其标准用户/管理员事件端点，并经 external_subject_id 映射主体。
 		// 没有验证通过的平台映射的事件被刻意跳过。

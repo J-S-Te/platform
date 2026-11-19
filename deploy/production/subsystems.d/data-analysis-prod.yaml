@@ -45,7 +45,7 @@ runtime:
         OIDC_SESSION_ABSOLUTE_TTL: 8h
         # 中央会话只读缓存显式关闭（0=关闭；开启后平台撤销/登出的本地生效延迟≤该毫秒值，上限 5000）。
         CENTRAL_SESSION_CACHE_MS: "0"
-        OIDC_AUTHORIZATION_REFRESH_INTERVAL: 1m
+        OIDC_AUTHORIZATION_REFRESH_INTERVAL: 10s
         OIDC_ROLE_CONFIG_HASH: sha256:265b9f487ff7ff2f298f9daef323d0e92883bd2086b51f0a57e6ceea3e3b9f1a
         PLATFORM_AUTHORIZATION_CATALOG_SYNC_ENABLED: "true"
         PLATFORM_BASE_URL: http://platform-api:8080

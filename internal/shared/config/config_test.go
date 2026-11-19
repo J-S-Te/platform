@@ -265,6 +265,36 @@ func TestKeycloakBrokerHealthPollInterval(t *testing.T) {
 	}
 }
 
+func TestKeycloakProjectionWorkers(t *testing.T) {
+	t.Setenv("ENV_FILE", filepath.Join(t.TempDir(), "missing.env"))
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Keycloak.ProjectionWorkers != 4 {
+		t.Fatalf("ProjectionWorkers = %d, want 4", cfg.Keycloak.ProjectionWorkers)
+	}
+
+	t.Setenv("KEYCLOAK_PROJECTION_WORKERS", "7")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Keycloak.ProjectionWorkers != 7 {
+		t.Fatalf("ProjectionWorkers = %d, want 7", cfg.Keycloak.ProjectionWorkers)
+	}
+
+	t.Setenv("KEYCLOAK_PROJECTION_WORKERS", "0")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Keycloak.ProjectionWorkers != 1 {
+		t.Fatalf("ProjectionWorkers = %d, want 1 fallback", cfg.Keycloak.ProjectionWorkers)
+	}
+}
+
 func TestLoadDefaultsOAuthClientSecretRetirementToKeep(t *testing.T) {
 	t.Setenv("ENV_FILE", filepath.Join(t.TempDir(), "missing.env"))
 
