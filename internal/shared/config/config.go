@@ -208,6 +208,10 @@ type KeycloakConfig struct {
 	BrokerClientSecret               string
 	CustomerPortalBrokerClientID     string
 	CustomerPortalBrokerClientSecret string
+	// ProjectionWorkers 是 Keycloak 授权投影 worker 的并发副本数。每个副本独立轮询
+	// keycloak_authorization_outbox，Claim 使用 SKIP LOCKED，因此可按授权变更量横向扩展。
+	// 非正值按 1 处理，避免配置错误导致权限投影停摆。
+	ProjectionWorkers int
 	// BrokerHealthPollInterval 是 Keycloak Broker 健康巡检周期；0 或负数表示禁用周期巡检，
 	// 仅保留启动时的一次 reconcile。
 	BrokerHealthPollInterval time.Duration
@@ -331,6 +335,13 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	keycloakProjectionWorkers, err := integer("KEYCLOAK_PROJECTION_WORKERS", 4)
+	if err != nil {
+		return Config{}, err
+	}
+	if keycloakProjectionWorkers <= 0 {
+		keycloakProjectionWorkers = 1
+	}
 	legacyPlatformAccessTokenEnabled, err := boolean("AUTH_LEGACY_PLATFORM_ACCESS_TOKEN_ENABLED", true)
 	if err != nil {
 		return Config{}, err
@@ -438,6 +449,7 @@ func Load() (Config, error) {
 			BrokerClientSecret:               value("KEYCLOAK_PLATFORM_CLIENT_SECRET", ""),
 			CustomerPortalBrokerClientID:     value("KEYCLOAK_CUSTOMER_PORTAL_CLIENT_ID", ""),
 			CustomerPortalBrokerClientSecret: value("KEYCLOAK_CUSTOMER_PORTAL_CLIENT_SECRET", ""),
+			ProjectionWorkers:                keycloakProjectionWorkers,
 			BrokerHealthPollInterval:         keycloakBrokerHealthPoll(value("KEYCLOAK_BROKER_HEALTH_POLL_INTERVAL", "5m")),
 			OutageLoginPolicy:                strings.ToLower(value("KEYCLOAK_OUTAGE_LOGIN_POLICY", KeycloakOutagePolicyContinueExistingPlatformSessions)),
 		},
