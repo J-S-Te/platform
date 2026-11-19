@@ -36,7 +36,9 @@ func main() {
 	}
 }
 
-// run 启动 HTTP 服务，并用 shutdown.Manager 编排“停止接收 → 排空在途 → 释放依赖”的顺序。
+// run 用途：启动 HTTP 服务，按停止接收、排空在途、释放依赖的顺序优雅停机。
+// 参数：无。
+// 返回值：配置、启动或关闭失败时返回错误。
 func run() error {
 	cfg, err := config.Load()
 	if err != nil {
@@ -62,6 +64,8 @@ func run() error {
 		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
+
+	server.RegisterOnShutdown(app.StopNotificationStreams)
 
 	// 信号只负责触发排空；具体顺序与预算由 shutdown.Manager 统一编排。
 	shutdownSignal := make(chan os.Signal, 1)
