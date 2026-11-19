@@ -78,9 +78,10 @@ import (
 
 // API 是 HTTP 进程的依赖容器，保存服务路由、日志器与资源句柄。
 type API struct {
-	Handler         http.Handler
-	Logger          *slog.Logger
-	OfflineDelivery *OfflineDeliveryRunner
+	Handler                 http.Handler
+	Logger                  *slog.Logger
+	OfflineDelivery         *OfflineDeliveryRunner
+	StopNotificationStreams func()
 
 	database           *gorm.DB
 	oidcDatabase       *gorm.DB
@@ -937,7 +938,8 @@ func NewAPI(cfg config.Config) (*API, error) {
 	}
 	auditRecorder := middleware.AuditRecorder(auditService)
 	api := &API{
-		OfflineDelivery: offlineDelivery,
+		OfflineDelivery:         offlineDelivery,
+		StopNotificationStreams: operational.InboxFeed.Close,
 		Handler: httptransport.NewRouter(
 			cfg, logger, db, authHandler, bootstrapHandler, managementHandler, accountLifecycleHandler, authorizationHandler, applicationAccessHandler, positionGrantHandler, auditHandler, firstRunHandler, configurationHandler, settingsHandler, dictionaryHandler, loginSecurityHandler, applicationTokenHandler, applicationManagementHandler, oauthClientManagementHandler, applicationRegistryService, auditRecorder, oidcHandler, operational,
 		),
@@ -1053,9 +1055,13 @@ func resolvePlatformCatalogOperatorID(db *gorm.DB, tenantID string) (string, err
 	return applicationaccess.PlatformCatalogBootstrapOperatorID, nil
 }
 
-// Close 释放 API 持有的数据库连接与日志文件句柄。
-// 仅在 NewAPI 初始化完成后调用；若依赖未就绪则按空值保护直接返回。
+// Close 用途：停止通知订阅并释放 API 持有的数据库连接与日志文件。
+// 参数：无；部分依赖可能尚未装配。
+// 返回值：无；资源关闭失败写入日志。
 func (api *API) Close() {
+	if api.StopNotificationStreams != nil {
+		api.StopNotificationStreams()
+	}
 	if api.logoutWorkerCancel != nil {
 		api.logoutWorkerCancel()
 	}

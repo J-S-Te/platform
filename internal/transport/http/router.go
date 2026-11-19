@@ -22,6 +22,7 @@ import (
 	"github.com/J-S-Te/Basic-Platform/internal/platform/firstrun"
 	identityhttp "github.com/J-S-Te/Basic-Platform/internal/platform/identity/interfaces/http"
 	licensehttp "github.com/J-S-Te/Basic-Platform/internal/platform/license/interfaces/http"
+	notificationinfrastructure "github.com/J-S-Te/Basic-Platform/internal/platform/notification/infrastructure"
 	notificationhttp "github.com/J-S-Te/Basic-Platform/internal/platform/notification/interfaces/http"
 	oidchttp "github.com/J-S-Te/Basic-Platform/internal/platform/oidc/interfaces/http"
 	ownerdirectoryhttp "github.com/J-S-Te/Basic-Platform/internal/platform/ownerdirectory/interfaces/http"
@@ -58,6 +59,7 @@ type OperationalModules struct {
 	DeploymentStatusHandler  applicationregistryhttp.DeploymentStatusHTTPHandler
 	SubsystemServiceRoutes   *applicationregistryhttp.SubsystemServiceRouteHandler
 	Notifications            *notificationhttp.Handler
+	InboxFeed                *notificationinfrastructure.InboxFeed
 	SecurityEvents           *securityevent.Handler
 	AsyncJobs                *filetaskhttp.Handler
 	ExternalIdentity         *externalidentityhttp.Handler
@@ -571,6 +573,10 @@ func NewRouter(
 			apiRouter.POST("/notifications/messages", middleware.RequirePermission("platform:notification:operate"), adaptHandler(operational.Notifications.CreateMessage))
 			apiRouter.GET("/notifications/deliveries", middleware.RequirePermission("platform:notification:operate"), adaptHandler(operational.Notifications.ListDeliveries))
 			apiRouter.POST("/notifications/deliveries/retry", middleware.RequirePermission("platform:notification:operate"), adaptHandler(operational.Notifications.RetryFailed))
+			if operational.InboxFeed != nil {
+				stream := notificationhttp.NewInboxStream(operational.InboxFeed.Subscribe, authHandler.Authenticate, authHandler.CookieName(), logger)
+				apiRouter.GET("/notifications/inbox/stream", adaptHandler(stream.ServeHTTP))
+			}
 			apiRouter.GET("/notifications/inbox", adaptHandler(operational.Notifications.ListInbox))
 			apiRouter.GET("/notifications/inbox/unread-count", adaptHandler(operational.Notifications.UnreadCount))
 			apiRouter.GET("/notifications/badge", adaptHandler(operational.Notifications.UnreadBadge))

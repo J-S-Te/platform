@@ -302,6 +302,7 @@ func buildOperationalModules(cfg config.Config, database *gorm.DB, logger *slog.
 		DeploymentStatusHandler:  subsystemHandler,
 		SubsystemServiceRoutes:   subsystemServiceRouteHandler,
 		Notifications:            notificationHandler,
+		InboxFeed:                notificationinfrastructure.NewInboxFeed(database, logger),
 		SecurityEvents:           securityEventHandler,
 		AsyncJobs:                fileTaskHandler,
 		AccessApplier:            subsystemProvisioner,
