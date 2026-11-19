@@ -60,7 +60,14 @@ func TestProductionBusinessModesSurviveControlledUpdate(t *testing.T) {
 				t.Fatal(err)
 			}
 			target := &productionComposeTarget{config: productionComposeTargetConfig{DeployRoot: root, Profile: profile}}
-			if err := target.writeRuntimeFixedValues(application.SubsystemProvisioningInput{ApplicationCode: item.code}); err != nil {
+			input := application.SubsystemProvisioningInput{
+				ApplicationCode: item.code,
+				Environment:     profile.Manifest.Application.Environment,
+			}
+			if item.code == integratedCustomerApplicationCode {
+				prepareCRMProjectHistoryBusinessModeRuntime(t, target, input)
+			}
+			if err := target.writeRuntimeFixedValues(input); err != nil {
 				t.Fatal(err)
 			}
 			actual, err := readEnvironmentValues(path)
@@ -74,4 +81,32 @@ func TestProductionBusinessModesSurviveControlledUpdate(t *testing.T) {
 			}
 		})
 	}
+}
+
+// prepareCRMProjectHistoryBusinessModeRuntime 用正式模板模拟 CRM 受控更新前的扩展初始化。
+// 参数：t 为测试上下文，target 指向临时部署目录，input 为测试目标的应用和环境。
+// 返回值：无；缺少清单、模板或初始化失败时中止当前测试。
+func prepareCRMProjectHistoryBusinessModeRuntime(t *testing.T, target *productionComposeTarget, input application.SubsystemProvisioningInput) {
+	t.Helper()
+	for _, file := range target.config.Profile.Manifest.Runtime.Files {
+		if file.Path != productionCRMProjectHistoryRuntimePath {
+			continue
+		}
+		content, err := os.ReadFile(filepath.Join(platformModuleRoot(t), "deploy/production", file.TemplatePath))
+		if err != nil {
+			t.Fatal(err)
+		}
+		template := filepath.Join(target.config.DeployRoot, file.TemplatePath)
+		if err := os.MkdirAll(filepath.Dir(template), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(template, content, 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := target.initializeInheritedRuntimeExtensions(input); err != nil {
+			t.Fatalf("initialize CRM project history runtime: %v", err)
+		}
+		return
+	}
+	t.Fatal("CRM project history runtime file missing from reviewed profile")
 }
