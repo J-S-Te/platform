@@ -5,7 +5,7 @@ default: false
 application:
   code: customer_and_opportunity
   initial_admin_roles: [sales_director, team_lead, technical_director]
-  allowed_service_bindings: [owner_directory_read, contract_summary_read, contract_opportunity_signed_write, contract_opportunity_signed_count_read, notification_ingest, file_gateway_write]
+  allowed_service_bindings: [owner_directory_read, contract_summary_read, contract_opportunity_signed_write, contract_opportunity_signed_count_read, notification_ingest, file_gateway_write, crm_project_history_read]
   name: 客户与商机管理系统
   description: 客户、商机与售前协作管理系统
   environment: prod
@@ -56,6 +56,10 @@ runtime:
         PLATFORM_OWNER_DIRECTORY_URL: http://platform-api:8080/api/v1/internal/owner-directory
         PLATFORM_MANAGEMENT_TOKEN_URL: http://platform-api:8080/oauth2/token
         PLATFORM_OWNER_DIRECTORY_SCOPE: owner_directory.read
+        CRM_PROJECT_HISTORY_ENABLED: "true"
+        CRM_PROJECT_HISTORY_URL: http://project-api:8082/internal/v1/crm/customers
+        CRM_PROJECT_HISTORY_TOKEN_URL: http://platform-api:8080/oauth2/token
+        CRM_PROJECT_HISTORY_SCOPE: crm.project_history.read
         # 合同摘要端点与双向机器凭据已由受控接入创建；生产必须开启，
         # 否则商机“确认签约/赢单”会因 verifier 为空返回 503。
         # 手工/灾后环境在凭据未交付前保持关闭，由受控更新补齐后再开启。
@@ -98,6 +102,8 @@ runtime:
         PLATFORM_NOTIFICATION_CLIENT_SECRET: service.notification_ingest.client_secret
         PLATFORM_OWNER_DIRECTORY_CLIENT_ID: service.owner_directory_read.client_id
         PLATFORM_OWNER_DIRECTORY_CLIENT_SECRET: service.owner_directory_read.client_secret
+        CRM_PROJECT_HISTORY_CLIENT_ID: service.crm_project_history_read.client_id
+        CRM_PROJECT_HISTORY_CLIENT_SECRET: service.crm_project_history_read.client_secret
         CONTRACT_SUMMARY_CLIENT_ID: service.contract_summary_read.client_id
         CONTRACT_SUMMARY_CLIENT_SECRET: service.contract_summary_read.client_secret
         CONTRACT_CLIENT_ID: service.contract_opportunity_signed_write.client_id

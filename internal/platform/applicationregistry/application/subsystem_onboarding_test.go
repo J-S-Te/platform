@@ -260,6 +260,9 @@ func TestOnboardSubsystemServiceBindingsFromManifestDriveClientCreation(t *testi
 	}
 }
 
+// TestOnboardSubsystemServiceBindingsFallbackMatchesHardcodedDefault 核对 CRM 默认机器用途。
+// 参数：t 为测试上下文。
+// 返回值：无。
 func TestOnboardSubsystemServiceBindingsFallbackMatchesHardcodedDefault(t *testing.T) {
 	// 未声明 allowed_service_bindings 时回退平台硬编码默认。
 	repository := &subsystemOnboardingRepositoryStub{}
@@ -275,15 +278,20 @@ func TestOnboardSubsystemServiceBindingsFallbackMatchesHardcodedDefault(t *testi
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if len(repository.write.ServiceClients) != 6 {
-		t.Fatalf("fallback clients = %d, want audit + owner_directory + notification + signed count + contract summary + signed write", len(repository.write.ServiceClients))
+	want := map[string]bool{
+		ServiceCredentialAuditIngest: true, ServiceCredentialOwnerDirectoryRead: true,
+		ServiceCredentialNotificationIngest: true, ServiceCredentialContractOpportunitySignedCountRead: true,
+		ServiceCredentialContractSummaryRead: true, ServiceCredentialContractOpportunitySignedWrite: true,
+		ServiceCredentialCRMProjectHistoryRead: true,
 	}
-	purposes := map[string]bool{}
+	if len(repository.write.ServiceClients) != len(want) {
+		t.Fatalf("fallback clients = %d, want %d", len(repository.write.ServiceClients), len(want))
+	}
 	for _, item := range repository.write.ServiceClients {
-		purposes[item.Purpose] = true
-	}
-	if !purposes[ServiceCredentialAuditIngest] || !purposes[ServiceCredentialOwnerDirectoryRead] || !purposes[ServiceCredentialNotificationIngest] || !purposes[ServiceCredentialContractOpportunitySignedCountRead] || !purposes[ServiceCredentialContractSummaryRead] || !purposes[ServiceCredentialContractOpportunitySignedWrite] {
-		t.Fatalf("fallback clients = %v", purposes)
+		if !want[item.Purpose] {
+			t.Fatalf("unexpected or duplicate default purpose %s", item.Purpose)
+		}
+		delete(want, item.Purpose)
 	}
 }
 
@@ -305,6 +313,9 @@ func TestOnboardSubsystemRejectsUnregisteredServiceBindingPurpose(t *testing.T) 
 	}
 }
 
+// TestOnboardCustomerOpportunityCreatesIsolatedOwnerDirectoryClient 核对 CRM 专用机器身份的交付。
+// 参数：t 为测试上下文。
+// 返回值：无。
 func TestOnboardCustomerOpportunityCreatesIsolatedOwnerDirectoryClient(t *testing.T) {
 	repository := &subsystemOnboardingRepositoryStub{}
 	service, err := NewSubsystemOnboardingService(repository, &sequentialManagementIDs{}, fixedSubsystemClock{now: time.Date(2026, time.August, 2, 0, 0, 0, 0, time.UTC)}, RedirectURIValidationPolicy{})
@@ -320,12 +331,18 @@ func TestOnboardCustomerOpportunityCreatesIsolatedOwnerDirectoryClient(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(repository.write.ServiceClients) != 6 || len(result.ServiceCredentials) != 6 {
+	if len(repository.write.ServiceClients) != 7 || len(result.ServiceCredentials) != 7 {
 		t.Fatalf("service clients write=%d result=%d", len(repository.write.ServiceClients), len(result.ServiceCredentials))
 	}
 	credentials := make(map[string]SubsystemServiceCredential, len(result.ServiceCredentials))
 	for _, credential := range result.ServiceCredentials {
 		credentials[credential.Purpose] = credential
+	}
+	history := credentials[ServiceCredentialCRMProjectHistoryRead]
+	if history.OAuthClient.ClientID != "customer_and_opportunity-dev-crm-project-history" ||
+		len(history.OAuthClient.Scopes) != 1 || history.OAuthClient.Scopes[0] != "crm.project_history.read" ||
+		history.PlaintextSecret == "" {
+		t.Fatal("missing isolated CRM project history credential")
 	}
 	auditCredential := credentials[ServiceCredentialAuditIngest]
 	if len(auditCredential.OAuthClient.Scopes) != 1 || auditCredential.OAuthClient.Scopes[0] != "audit.ingest" || auditCredential.PlaintextSecret == "" {

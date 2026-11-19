@@ -36,6 +36,10 @@ runtime:
         SETTLEMENT_REFERENCE_AUDIENCE: basic-platform-application
         SETTLEMENT_REFERENCE_ISSUER: basic-platform
         SETTLEMENT_REFERENCE_PUBLIC_KEY_PATH: /app/data/keys/jwt-ed25519-public.pem
+        CRM_PROJECT_HISTORY_MACHINE_ENABLED: "true"
+        CRM_PROJECT_HISTORY_MACHINE_AUDIENCE: basic-platform-application
+        CRM_PROJECT_HISTORY_MACHINE_ISSUER: basic-platform
+        CRM_PROJECT_HISTORY_MACHINE_PUBLIC_KEY_PATH: /app/data/keys/jwt-ed25519-public.pem
         # 人员离职交接入站（BIZ-XWIRE-04）：平台按批次租户自签短效 application JWT，
         # 项目侧只用平台 Ed25519 公钥验签；issuer/audience/client/应用/环境/scope 固定，
         # 租户只来自令牌。CALLER_APPLICATION_CODE 必须是平台应用编码 platform，
@@ -108,6 +112,7 @@ runtime:
         REIMBURSEMENT_SPEND_CLIENT_ID: related_service.reimbursement.project_reimbursement_cost_write.client_id
         REIMBURSEMENT_MACHINE_CALLER_ENVIRONMENT_CODE: environment
         SETTLEMENT_REFERENCE_CALLER_ENVIRONMENT_CODE: environment
+        CRM_PROJECT_HISTORY_MACHINE_CALLER_ENVIRONMENT_CODE: environment
         CENTRAL_SESSION_ENABLED: central_session_enabled
         CENTRAL_SESSION_PUBLIC_BASE_URL: central_session_public_base_url
         OIDC_ISSUER: issuer

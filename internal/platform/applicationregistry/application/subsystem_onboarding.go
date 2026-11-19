@@ -68,6 +68,7 @@ const (
 	ServiceCredentialAnalysisContractImportReportStatus = "analysis_contract_import_report_status"
 	ServiceCredentialContractDashboardRead              = "contract_dashboard_read"
 	ServiceCredentialProjectDashboardRead               = "project_dashboard_read"
+	ServiceCredentialCRMProjectHistoryRead              = "crm_project_history_read"
 	ServiceCredentialSettlementDashboardRead            = "settlement_dashboard_read"
 	ServiceCredentialSettlementReimbursementCostRead    = "settlement_reimbursement_cost_read"
 	ServiceCredentialContractApprovedRead               = "contract_approved_read"
@@ -731,6 +732,7 @@ var integratedServicePurposeRegistry = map[string]integratedServicePurposeDefini
 	ServiceCredentialCRMOpportunityImportProvision:      {ServiceCredentialCRMOpportunityImportProvision, "crm-opportunity-import-provision", "CRM Opportunity Import Provisioner", "opportunity.import_provision"},
 	ServiceCredentialContractDashboardRead:              {ServiceCredentialContractDashboardRead, "contract-dashboard", "Contract Dashboard Reader", "dashboard.contract.read"},
 	ServiceCredentialProjectDashboardRead:               {ServiceCredentialProjectDashboardRead, "project-dashboard", "Project Dashboard Reader", "dashboard.project.read"},
+	ServiceCredentialCRMProjectHistoryRead:              {ServiceCredentialCRMProjectHistoryRead, "crm-project-history", "CRM Project History Reader", "crm.project_history.read"},
 	ServiceCredentialSettlementReimbursementCostRead:    {ServiceCredentialSettlementReimbursementCostRead, "reimbursement-cost", "Settlement Reimbursement Cost Reader", "reimbursement.cost_candidate.read"},
 	ServiceCredentialSettlementDashboardRead:            {ServiceCredentialSettlementDashboardRead, "settlement-dashboard", "Settlement Dashboard Reader", "dashboard.settlement.read"},
 	ServiceCredentialContractApprovedRead:               {ServiceCredentialContractApprovedRead, "contract-approved-reader", "Approved Contract Reader", "contract.approved.internal.read"},
@@ -753,7 +755,7 @@ func hardcodedIntegratedServicePurposes(applicationCode string) []string {
 		// 合同核验与签约回写是 CRM 的默认跨系统能力：本地/首次接入也必须
 		// 用 CRM 自己的 client 身份（customer_and_opportunity-<env>-*）创建，
 		// 不能借用合同应用凭据（否则合同 Ed25519 验签的 caller 绑定会 401）。
-		return []string{ServiceCredentialOwnerDirectoryRead, ServiceCredentialNotificationIngest, ServiceCredentialContractOpportunitySignedCountRead, ServiceCredentialContractSummaryRead, ServiceCredentialContractOpportunitySignedWrite}
+		return []string{ServiceCredentialOwnerDirectoryRead, ServiceCredentialNotificationIngest, ServiceCredentialContractOpportunitySignedCountRead, ServiceCredentialContractSummaryRead, ServiceCredentialContractOpportunitySignedWrite, ServiceCredentialCRMProjectHistoryRead}
 	case integratedPortalApplicationCode:
 		return []string{
 			ServiceCredentialExternalUserProvision,

@@ -164,6 +164,9 @@ func (stub *serviceCredentialManagerStub) CreateOAuthClientSecret(_ context.Cont
 	return application.OAuthClientSecretResult{PlaintextSecret: "retry-secret"}, nil
 }
 
+// TestEnsureUpdateServiceCredentialsRepairsCustomerAuditAndNotification 核对 CRM 更新的凭据交付。
+// 参数：t 为测试上下文。
+// 返回值：无。
 func TestEnsureUpdateServiceCredentialsRepairsCustomerAuditAndNotification(t *testing.T) {
 	manager := &serviceCredentialManagerStub{clients: []application.OAuthClientView{{
 		ID: "audit-client-id", ApplicationID: "application-1", EnvironmentID: "environment-1",
@@ -197,12 +200,14 @@ func TestEnsureUpdateServiceCredentialsRepairsCustomerAuditAndNotification(t *te
 		t.Fatalf("CRM runtime credentials must all be rotated: %#v", manager.secretInputs)
 	}
 	requireOnlyCreatedClients(t, manager.createdInputs, map[string][]string{
+		"customer_and_opportunity-dev-crm-project-history":    {"crm.project_history.read"},
 		"customer_and_opportunity-dev-notification-publisher": {"notification.ingest"},
 		"customer_and_opportunity-dev-owner-directory":        {"owner_directory.read"},
 		"customer_and_opportunity-dev-contract-signed-count":  {"contract.opportunity_signed_count.read"},
 		"customer_and_opportunity-dev-file-gateway-writer":    {"platform:file:upload", "platform:file:bind", "platform:file:download"},
 	})
 	requireOnlyCredentialPurposes(t, credentials, map[string]string{
+		application.ServiceCredentialCRMProjectHistoryRead:              "new-secret",
 		application.ServiceCredentialAuditIngest:                        "retry-secret",
 		application.ServiceCredentialContractOpportunitySignedWrite:     "retry-secret",
 		application.ServiceCredentialContractSummaryRead:                "retry-secret",
