@@ -4,6 +4,7 @@ package infrastructure
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -185,17 +186,15 @@ type exportPayload struct {
 
 func (asyncJobModel) TableName() string { return "async_job" }
 
-// Ingest 在单事务内解析启用中的来源应用、写入事件与去重行，返回首次/重复回执；
-// 事件只追加，幂等由 (tenant, application, environment, event_id) 保证。
+// Ingest 在一个事务内写入单条审计事件、哈希链和去重记录。
+// 参数：ctx 为请求上下文，tenantID 为可信租户，input 为审计事件，now 为接收时间。
+// 返回值：首次或重复摄取回执；来源无效或持久化失败时返回错误。
 func (r *Repository) Ingest(ctx context.Context, tenantID string, input application.EventInput, now time.Time) (domain.Receipt, error) {
 	// 来源应用和环境必须在同一租户内保持启用；解析来源、写事件和写去重行放在同一事务，
 	// 避免出现事件已保存但重试仍被当作首次提交的窗口。
 	var receipt domain.Receipt
-	err := r.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		app, env, err := resolveActiveSource(tx, tenantID, input.ApplicationCode, input.EnvironmentCode)
-		if err != nil {
-			return err
-		}
+	err := r.writeSourceTransaction(ctx, tenantID, input.ApplicationCode, input.EnvironmentCode, func(tx *gorm.DB, app applicationModel, env environmentModel) error {
+		var err error
 		receipt, err = r.ingestEvent(tx, tenantID, app, env, input, now)
 		return err
 	})
@@ -205,16 +204,12 @@ func (r *Repository) Ingest(ctx context.Context, tenantID string, input applicat
 	return receipt, nil
 }
 
-// 批量接收把新事件、重复事件判定及整批投递回执放在同一事务；数据库任一步失败会回滚
-// 整批。重复 event_id 是可重试投递的正常完成结果，会单独计数而不是让整批失败。
+// IngestBatch 在同一来源事务内追加批量事件和投递回执，重复事件计入回执。
+// 参数：ctx 为请求上下文，tenantID 为可信租户，delivery 为投递来源，inputs 为事件，now 为接收时间。
+// 返回值：每条事件的摄取回执；来源或持久化失败时整批回滚并返回错误。
 func (r *Repository) IngestBatch(ctx context.Context, tenantID string, delivery application.BatchDeliveryInput, inputs []application.EventInput, now time.Time) ([]domain.Receipt, error) {
 	receipts := make([]domain.Receipt, 0, len(inputs))
-	err := r.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		app, env, err := resolveActiveSource(tx, tenantID, delivery.ApplicationCode, delivery.EnvironmentCode)
-		if err != nil {
-			return err
-		}
-
+	err := r.writeSourceTransaction(ctx, tenantID, delivery.ApplicationCode, delivery.EnvironmentCode, func(tx *gorm.DB, app applicationModel, env environmentModel) error {
 		acceptedCount := uint(0)
 		duplicateCount := uint(0)
 		for _, input := range inputs {
@@ -242,7 +237,30 @@ func (r *Repository) IngestBatch(ctx context.Context, tenantID string, delivery 
 	return receipts, nil
 }
 
-func resolveActiveSource(database *gorm.DB, tenantID, applicationCode, environmentCode string) (applicationModel, environmentModel, error) {
+// writeSourceTransaction 先锁住已存在的来源环境，再执行去重和哈希链追加。
+// 参数：ctx 为请求上下文，tenantID、applicationCode、environmentCode 为来源标识，
+// write 为同源审计写入。
+// 返回值：事务提交结果；来源无效或操作失败时回滚。
+func (r *Repository) writeSourceTransaction(
+	ctx context.Context, tenantID, applicationCode, environmentCode string,
+	write func(*gorm.DB, applicationModel, environmentModel) error,
+) error {
+	// 同环境按已存在的环境行串行化（包括首次建链）；已提交读避免不同环境的
+	// 不存在去重键落在同一索引间隙时相互阻塞。
+	return r.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		app, env, err := resolveActiveSource(tx, tenantID, applicationCode, environmentCode, true)
+		if err != nil {
+			return err
+		}
+		return write(tx, app, env)
+	}, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
+}
+
+// resolveActiveSource 解析同租户有效的应用和环境，可锁定用于审计写入的环境行。
+// 参数：database 为数据库或写事务，tenantID、applicationCode、environmentCode
+// 为来源标识，lockEnvironment 指示是否锁住环境行。
+// 返回值：有效应用和环境；来源未登记、已停用或查询失败时返回错误。
+func resolveActiveSource(database *gorm.DB, tenantID, applicationCode, environmentCode string, lockEnvironment bool) (applicationModel, environmentModel, error) {
 	// 来源由机器凭据对应租户和事件声明的应用/环境共同解析，只接受有效登记，防止审计
 	// 发布者把事件归入其他租户或已经下线的环境。
 	var app applicationModel
@@ -250,7 +268,11 @@ func resolveActiveSource(database *gorm.DB, tenantID, applicationCode, environme
 		return applicationModel{}, environmentModel{}, err
 	}
 	var env environmentModel
-	if err := database.Where("application_id = ? AND environment = ? AND status = ?", app.ID, environmentCode, "ACTIVE").Take(&env).Error; err != nil {
+	query := database.Where("application_id = ? AND environment = ? AND status = ?", app.ID, environmentCode, "ACTIVE")
+	if lockEnvironment {
+		query = query.Clauses(clause.Locking{Strength: "UPDATE"})
+	}
+	if err := query.Take(&env).Error; err != nil {
 		return applicationModel{}, environmentModel{}, err
 	}
 	return app, env, nil
@@ -1023,11 +1045,12 @@ type chainVerifyRow struct {
 	ChainSequence  uint64
 }
 
-// VerifyEventChain 校验（租户、应用、环境）维度的哈希链分段：自证每行 chain_hash 可由
-// chain_prev_hash 与 payload_hash 重算，窗口内序列连续、链指针连续；链首要求 prev 为全零。
-// 序列缺口（留存清理或历史数据）记为 GAP 停止校验，不是“链断裂”。
+// VerifyEventChain 校验单一审计来源的哈希、序列和前序链指针。
+// 参数：ctx 为请求上下文，tenantID、applicationCode、environmentCode 为来源标识，
+// fromSequence 为起始链序号，limit 为校验窗口上限。
+// 返回值：链校验结果；留存或历史序列缺口记为 GAP，来源或查询失败返回错误。
 func (r *Repository) VerifyEventChain(ctx context.Context, tenantID, applicationCode, environmentCode string, fromSequence uint64, limit int) (domain.ChainVerification, error) {
-	app, env, err := resolveActiveSource(r.database.WithContext(ctx), tenantID, applicationCode, environmentCode)
+	app, env, err := resolveActiveSource(r.database.WithContext(ctx), tenantID, applicationCode, environmentCode, false)
 	if err != nil {
 		return domain.ChainVerification{}, r.mapError(err)
 	}
