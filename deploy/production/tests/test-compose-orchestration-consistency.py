@@ -1388,6 +1388,28 @@ class OrchestrationConsistencyTest(unittest.TestCase):
         self.assertRegex(root_env, r"(?m)^ALERT_AUTO_RESOLVE=false$",
                          f".env.example 必须显式声明 ALERT_AUTO_RESOLVE=false（Compose 插值来源）")
 
+    def test_customer_project_history_and_contract_readiness_are_wired(self) -> None:
+        """CRM 项目历史独立运行文件必须被 customer-api 加载，合同/CRM 探针必须走 readyz。"""
+        services = self.services(self.canonical, CANONICAL)
+        customer = services.get("customer-api") or {}
+        self.assertIn(
+            "CUSTOMER_PROJECT_HISTORY_RUNTIME_ENV_FILE",
+            str(customer.get("env_file") or ""),
+            "customer-api 必须加载 runtime/customer-project-history.env，否则平台已交付的凭据不会进入容器",
+        )
+        customer_probe = str((customer.get("healthcheck") or {}).get("test") or "")
+        self.assertIn("/customer-opportunity/readyz", customer_probe)
+        contract = services.get("contract-api") or {}
+        contract_probe = str((contract.get("healthcheck") or {}).get("test") or "")
+        self.assertIn("/readyz", contract_probe)
+        self.assertTrue(
+            (PRODUCTION / "subsystem-templates/customer-project-history.env.example").is_file(),
+            "缺少 CRM 项目历史独立运行文件模板",
+        )
+        installer = (PRODUCTION / "bin/install-assets.sh").read_text()
+        self.assertIn("update_customer_history_env", installer)
+        self.assertIn("CUSTOMER_PROJECT_HISTORY_RUNTIME_ENV_FILE", installer)
+
     @unittest.skipUnless(DATA_ANALYSIS_COMPOSE.is_file(), "缺少 data_analysis 兄弟仓库")
     def test_data_analysis_compose_wires_alert_worker_env(self) -> None:
         """数析仓库的本地编排也必须给 alert-worker 租户与开关，否则本机栈起不来。"""
