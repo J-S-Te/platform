@@ -29,6 +29,10 @@ runtime:
         SETTLEMENT_REIMBURSEMENT_COST_TOKEN_URL: http://platform-api:8080/oauth2/token
         SETTLEMENT_REIMBURSEMENT_COST_SCOPE: reimbursement.cost_candidate.read
         SETTLEMENT_INTEGRATION_ENABLED: "true"
+        # 合同来源与本地财务依据并存；本地依据必须由财务经理显式登记。
+        SETTLEMENT_NATIVE_FINANCIAL_ENABLED: "true"
+        # 回款/冲销事实回写 CRM 客户信用，使用下方独立机器凭据。
+        SETTLEMENT_CRM_CREDIT_SYNC_ENABLED: "true"
         CONTRACT_INTEGRATION_AUDIENCE: basic-platform-application
         PLATFORM_MACHINE_TOKEN_PUBLIC_KEY_PATH: /app/data/keys/jwt-ed25519-public.pem
         PLATFORM_MACHINE_TOKEN_ISSUER: basic-platform

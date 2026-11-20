@@ -69,6 +69,8 @@ runtime:
         # （见对应子系统模板注释）。
         AUDIT_OUTBOX_DELIVERED_RETENTION_DAYS: "60"
         PROJECT_RUN_WORKER_WITH_API: "false"
+        # 允许无合同的原生委托项目纳入同一交付生命周期；权限仍由 project.create 控制。
+        PROJECT_NATIVE_ENABLED: "true"
         PROJECT_BACKGROUND_ENGINE: temporal
         PROJECT_BACKGROUND_TASK_QUEUE: project-management-background-v1
         PROJECT_BACKGROUND_DEPLOYMENT_NAME: project-management-background

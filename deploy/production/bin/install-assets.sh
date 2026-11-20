@@ -420,6 +420,61 @@ PY
     exit 1
   fi
   mv -f -- "$mount_update" "$compose_update"
+  # 历史活动编排只保留模块裁剪，新增的 CRM 项目历史独立运行文件必须定向补进
+  # customer-api 的 env_file；否则平台已下发 runtime/customer-project-history.env，
+  # 容器却读不到，客户详情一直显示“项目历史尚未启用”。
+  mount_update="$(mktemp "$target/.compose-customer-history.XXXXXX")"
+  if ! python3 - "$compose_update" >"$mount_update" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+
+def update_customer_history_env(source):
+    """用途：仅为活动 customer-api 补项目历史独立 env_file，保留所有其他编排行。
+    参数：source 为安装事务中的活动 Compose 文本。
+    返回值：补齐后的文本；结构不支持或重复时抛出异常，不写目标文件。
+    """
+    lines = source.splitlines(keepends=True)
+    starts = [i for i, line in enumerate(lines)
+              if re.fullmatch(r'  customer-api:\s*(?:#.*)?\n?', line)]
+    if len(starts) > 1:
+        raise ValueError('customer-api 服务重复，须人工审核')
+    if not starts:
+        return source
+    start = starts[0]
+    end = next((i for i in range(start + 1, len(lines))
+                if re.match(r'^(?:  [^\s#]|[^\s#])', lines[i])), len(lines))
+    block = lines[start:end]
+    envs = [i for i, line in enumerate(block) if re.fullmatch(r'    env_file:\s*(?:#.*)?\n?', line)]
+    if len(envs) > 1:
+        raise ValueError('customer-api env_file 重复，须人工审核')
+    if not envs:
+        raise ValueError('customer-api 缺少普通块式 env_file，须人工审核')
+    env_index = envs[0]
+    if any('CUSTOMER_PROJECT_HISTORY_RUNTIME_ENV_FILE' in line or
+           'runtime/customer-project-history.env' in line
+           for line in block[env_index + 1:]):
+        return source
+    block[env_index + 1:env_index + 1] = [
+        '      - path: ${CUSTOMER_PROJECT_HISTORY_RUNTIME_ENV_FILE:-runtime/customer-project-history.env}\n',
+        '        required: false\n',
+    ]
+    lines[start:end] = block
+    return ''.join(lines)
+
+
+try:
+    sys.stdout.write(update_customer_history_env(Path(sys.argv[1]).read_text()))
+except (OSError, ValueError) as error:
+    print('CRM 项目历史编排升级失败：' + str(error), file=sys.stderr)
+    raise SystemExit(1)
+PY
+  then
+    rm -f -- "$mount_update"
+    exit 1
+  fi
+  mv -f -- "$mount_update" "$compose_update"
   # 历史活动编排不随资产包整体替换（只保留模块裁剪），因此 monitoring 子系统的
   # 只读挂载必须定向补齐：活动现场只有 2 个规则文件挂载时，prometheus 的
   # rule_files 声明了 4 个文件而缺 2 个，缺文件时 prometheus 静默 fail-open
