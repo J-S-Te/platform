@@ -23,8 +23,11 @@ base_compose() {
     --env-file "$runtime_file" --env-file "$release_file" "$@"
 }
 
+# 用途：在单次平台任务容器中运行公开传输协调器。
+# 参数：传给协调器的子命令和选项。
+# 返回值：协调器退出码，候选二进制无效时返回非零。
 coordinator() {
-  base_compose run --rm --no-deps platform-api ./public-transport-coordinator "$@"
+  base_compose run --rm --no-deps -T platform-api ./public-transport-coordinator "$@" </dev/null
 }
 
 running_enabled_services() {
@@ -32,7 +35,7 @@ running_enabled_services() {
   # 使用可移植的仅服务查询。部分受支持 Compose 版本拒绝环境解析标志，
   # 旧版本则无法验证 no-interpolate 下保留默认表达式字面冒号的绑定挂载。
   enabled="$(base_compose config --services)" || return 1
-  running="$(base_compose ps --services --status running)" || return 1
+  running="$(base_compose ps --services --status running --status restarting)" || return 1
   while IFS= read -r service; do
     [[ -n "$service" ]] || continue
     if grep -Fxq -- "$service" <<<"$enabled"; then printf '%s\n' "$service"; fi
@@ -116,6 +119,74 @@ if [[ "${1:-}" == "abort" ]]; then
   exit 0
 fi
 
+# 用途：替换已接入子系统运行文件中的旧公开认证 URL。
+# 参数：切换前平台与 SSO 的 Origin。
+# 返回值：校验和写入成功返回 0，任何配置错误返回非零。
+reconcile_runtime_origins() {
+  base_compose config --environment |
+    python3 "$script_dir/reconcile-public-transport-runtime.py" "$deploy_dir" "$1" "$2" \
+    "$PUBLIC_PLATFORM_ORIGIN" "$PUBLIC_SSO_ORIGIN"
+}
+
+if [[ "${1:-}" == "--reconcile-runtime" ]]; then
+  [[ "$#" == 3 ]] || { echo '使用方式：--reconcile-runtime <旧平台 Origin> <旧 SSO Origin>' >&2; exit 2; }
+  public_transport_prepare "$deploy_dir" "$runtime_file"
+  status_json="$(coordinator status)"
+  jq -e --arg platform "$PUBLIC_PLATFORM_ORIGIN" --arg sso "$PUBLIC_SSO_ORIGIN" \
+    '.State == .Mode and (.State == "HTTP" or .State == "HTTPS") and .PlatformOrigin == $platform and .SSOOrigin == $sso' \
+    <<<"$status_json" >/dev/null
+  reconcile_runtime_origins "$2" "$3"
+  compose=(docker compose --project-directory "$deploy_dir" --file "$compose_file" --env-file "$runtime_file" --env-file "$release_file")
+  public_transport_compose_args compose
+  known_services="$("${compose[@]}" config --services)"
+  existing_services="$(running_enabled_services)"
+  recovery_services=()
+  while IFS= read -r service; do
+    grep -Fxq -- "$service" <<<"$existing_services" || continue
+    case "$service" in
+      contract-api|contract-worker|customer-api|customer-*-worker|portal-api|portal-*-worker|\
+      project-api|project-sla-notifier|reimbursement-api|reimbursement-worker|\
+      settlement-api|settlement-worker|settlement-*-worker|data-analysis-api|data-analysis-*-worker)
+        recovery_services+=("$service") ;;
+    esac
+  done <<< "$known_services"
+  if grep -Fxq subsystem-provisioner <<<"$existing_services"; then
+    "${compose[@]}" up -d --no-deps --force-recreate --wait --wait-timeout 120 subsystem-provisioner
+  fi
+  if ((${#recovery_services[@]})); then
+    "${compose[@]}" up -d --no-deps --wait --wait-timeout 120 "${recovery_services[@]}"
+  fi
+  exit 0
+fi
+
+# 用途：收敛已经提交的切换，等活动容器健康后清除现场阶段标记。
+# 参数：无，已完成切换记录提供旧 Origin，部署文件提供目标状态。
+# 返回值：运行配置、证书与活动服务验证通过后返回 0。失败时返回非零。
+finish_runtime_transition() {
+  local history source_platform source_sso running_services
+  local -a stable_command final_targets
+  history="$(coordinator last-completed)"
+  source_platform="$(jq -er '.SourcePlatformOrigin' <<<"$history")"
+  source_sso="$(jq -er '.SourceSSOOrigin' <<<"$history")"
+  # Compose 的稳定默认状态是 HTTP。HTTPS 是否监听由 PUBLIC_HTTPS_ENABLED 决定。
+  export PUBLIC_TRANSPORT_STATE=HTTP
+  public_transport_prepare "$deploy_dir" "$runtime_file"
+  reconcile_runtime_origins "$source_platform" "$source_sso"
+  stable_command=(docker compose --project-directory "$deploy_dir" --file "$compose_file" --env-file "$runtime_file" --env-file "$release_file")
+  public_transport_compose_args stable_command
+  public_transport_install_certificates
+  running_services="$(running_enabled_services)"
+  mapfile -t final_targets < <(printf '%s\n' "$running_services" | sed '/^$/d')
+  if ((${#final_targets[@]})); then
+    "${stable_command[@]}" up -d --no-deps --wait --wait-timeout 120 "${final_targets[@]}"
+  fi
+  persist_transport_state ""
+  if grep -Fxq subsystem-provisioner <<<"$running_services"; then
+    # 原子替换后的 .env 要重新绑定，避免子系统继承旧配置。
+    "${stable_command[@]}" up -d --no-deps --force-recreate --wait --wait-timeout 120 subsystem-provisioner
+  fi
+}
+
 # 先进行目标预检，HTTP 模式不检查证书路径。
 unset PUBLIC_TRANSPORT_STATE
 public_transport_prepare "$deploy_dir" "$runtime_file"
@@ -125,8 +196,8 @@ desired_mode=HTTP
 target_platform_origin="$PUBLIC_PLATFORM_ORIGIN"
 target_sso_origin="$PUBLIC_SSO_ORIGIN"
 
-status_json="$(coordinator status 2>/dev/null || true)"
-if [[ -z "$status_json" ]]; then
+# 首次查询可能在标准输出写入数据库诊断，按退出码判断是否初始化。
+if ! status_json="$(coordinator status 2>/dev/null)"; then
   current_mode="$(current_container_mode)"
   current_platform_origin="$(origin_for_mode "$current_mode" "$PUBLIC_PLATFORM_HOST" "$PUBLIC_HTTP_PORT" "$PUBLIC_HTTPS_PORT")"
   current_sso_origin="$(origin_for_mode "$current_mode" "$PUBLIC_SSO_HOST" "$PUBLIC_SSO_HTTP_PORT" "$PUBLIC_SSO_HTTPS_PORT")"
@@ -145,14 +216,10 @@ if [[ "$state" == "HTTP" || "$state" == "HTTPS" ]]; then
       echo "当前模式相同但公开域名/端口已变化；请使用独立主机名迁移流程，不能混入协议切换" >&2
       exit 1
     }
-    persist_transport_state ""
     if [[ -n "$configured_transition_state" ]]; then
-      unset PUBLIC_TRANSPORT_STATE
-      public_transport_prepare "$deploy_dir" "$runtime_file"
-      stable_command=(docker compose --project-directory "$deploy_dir" --file "$compose_file" --env-file "$runtime_file" --env-file "$release_file")
-      public_transport_compose_args stable_command
-      public_transport_install_certificates
-      "${stable_command[@]}" up -d --no-deps --wait --wait-timeout 120 frontend
+      finish_runtime_transition
+    else
+      public_transport_persist "$runtime_file"
     fi
     echo "公开传输已经稳定：${state}"
     exit 0
@@ -217,17 +284,5 @@ if [[ "$state" == "DISABLING_HTTPS" ]]; then
 fi
 
 coordinator commit --transition-id "$transition_id"
-persist_transport_state ""
-
-# 仅切换已运行且已启用服务，绝不启动尚未接管的子系统。
-unset PUBLIC_TRANSPORT_STATE
-public_transport_prepare "$deploy_dir" "$runtime_file"
-final_command=(docker compose --project-directory "$deploy_dir" --file "$compose_file" --env-file "$runtime_file" --env-file "$release_file")
-public_transport_compose_args final_command
-public_transport_install_certificates
-running_services="$(running_enabled_services)"
-mapfile -t final_targets < <(printf '%s\n' "$running_services" | sed '/^$/d')
-if ((${#final_targets[@]})); then
-  "${final_command[@]}" up -d --no-deps --wait --wait-timeout 120 "${final_targets[@]}"
-fi
+finish_runtime_transition
 echo "公开传输切换完成：${desired_mode}"

@@ -994,6 +994,7 @@ package_assets() (
     bin/deployment-session.py bin/deployment-plan.py bin/build-deployment-compatibility.py bin/deployment-workflow.sh bin/delivery-files.py
     bin/release-materials.py bin/release-workflow.py
     bin/provisioner-config-refresh.sh bin/publish-runtime-approvals.py bin/public-transport.sh bin/reload-public-certificate.sh
+    bin/reconcile-public-transport-runtime.py
     bin/restore-file-gateway.sh bin/restore-keycloak-mysql.sh bin/restore-mysql.sh bin/start-enabled.sh
     bin/set-container-timezone.sh bin/test-container-timezone.sh CONTAINER_TIMEZONE.md
     bin/test-auto-install-packages.sh bin/test-compose-scope.sh bin/test-deployment-parity.sh bin/test-doctor.sh bin/test-project-background.py

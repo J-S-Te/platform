@@ -155,6 +155,7 @@ jobs:
           timeout 120 python3 -B scripts/test_recover_local_license_pins.py
           timeout 120 python3 -B scripts/test_refresh_approvals.py
           python3 deploy/production/tests/test-compose-blocks.py
+          python3 -B deploy/production/tests/test-public-transport-runtime.py
           python3 -B deploy/production/tests/test-compose-one-shot-parity.py
           python3 -B deploy/production/tests/test-compose-orchestration-consistency.py
           # 接线漂移（清单键未写入模板、client_id 字面量推导不出、数析只读 DSN 缺失）

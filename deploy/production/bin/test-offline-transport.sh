@@ -31,6 +31,38 @@ write_config domain false platform.example.com sso.example.com 80 18090
 public_transport_prepare "$test_root"
 [[ "$PUBLIC_SSO_ORIGIN" == http://sso.example.com && "$PUBLIC_FRONTEND_SSO_HOST" == sso.example.com ]]
 write_config ip true
+openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=test \
+  -addext 'subjectAltName=IP:192.0.2.20' \
+  -keyout "$test_root/ip.key" -out "$test_root/ip.crt" >/dev/null 2>&1
+cat >>"$test_root/.env" <<'EOF'
+PUBLIC_HTTPS_PORT=18081
+PUBLIC_SSO_HTTPS_PORT=18445
+PUBLIC_HTTPS_BIND_ADDRESS=192.0.2.2
+PUBLIC_TLS_CERTIFICATE_PATH=ip.crt
+PUBLIC_TLS_PRIVATE_KEY_PATH=ip.key
+EOF
+public_transport_prepare "$test_root"
+[[ "$PUBLIC_PLATFORM_ORIGIN" == https://192.0.2.20:18081 ]]
+[[ "$PUBLIC_SSO_ORIGIN" == https://192.0.2.20:18445 ]]
+[[ "$PUBLIC_FRONTEND_SSO_HOST" == 192.0.2.20 ]]
+[[ "$PUBLIC_FRONTEND_SSO_TLS_PUBLISH" == 192.0.2.2:18445:444 ]]
+[[ "$PUBLIC_KEYCLOAK_HTTP_BIND_ADDRESS" == 127.0.0.1 ]]
+[[ "$PUBLIC_TRANSPORT_COOKIE_SECURE" == true ]]
+public_transport_persist "$test_root/.env"
+grep -Fxq 'PUBLIC_FRONTEND_SSO_TLS_PUBLISH=192.0.2.2:18445:444' "$test_root/.env"
+sed 's/PUBLIC_HTTPS_ENABLED=true/PUBLIC_HTTPS_ENABLED=false/' "$test_root/.env" >"$test_root/draining.env"
+echo 'PUBLIC_TRANSPORT_STATE=DISABLING_HTTPS' >>"$test_root/draining.env"
+public_transport_prepare "$test_root" "$test_root/draining.env"
+[[ "$PUBLIC_FRONTEND_SSO_TLS_PUBLISH" == 192.0.2.2:18445:444 ]]
+[[ -z "$PUBLIC_KEYCLOAK_HTTP_BIND_ADDRESS" ]]
+[[ "$PUBLIC_FRONTEND_SSO_HOST" == 192.0.2.20 && "$PUBLIC_TRANSPORT_COOKIE_SECURE" == false ]]
+sed 's/PUBLIC_SSO_HTTPS_PORT=18445/PUBLIC_SSO_HTTPS_PORT=18081/' "$test_root/.env" >"$test_root/conflict.env"
+if public_transport_prepare "$test_root" "$test_root/conflict.env" 2>/dev/null; then
+  echo 'conflicting public TLS ports were accepted' >&2; exit 1
+fi
+openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=192.0.2.20 \
+  -addext 'subjectAltName=DNS:192.0.2.20' \
+  -keyout "$test_root/ip.key" -out "$test_root/ip.crt" >/dev/null 2>&1
 expect_reject
 write_config domain false example.com example.com
 expect_reject
