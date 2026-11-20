@@ -435,6 +435,11 @@ def update_customer_history_env(source):
     参数：source 为安装事务中的活动 Compose 文本。
     返回值：补齐后的文本；结构不支持或重复时抛出异常，不写目标文件。
     """
+    # 已有活动编排的 healthcheck 也必须从 liveness 收敛到 readiness；仅替换精确的
+    # 本系统探针 URL，不触碰其他服务或自定义超时/重试参数。
+    source = source.replace('http://127.0.0.1:8081/healthz', 'http://127.0.0.1:8081/readyz')
+    source = source.replace('http://127.0.0.1:8090/customer-opportunity/healthz',
+                            'http://127.0.0.1:8090/customer-opportunity/readyz')
     lines = source.splitlines(keepends=True)
     starts = [i for i, line in enumerate(lines)
               if re.fullmatch(r'  customer-api:\s*(?:#.*)?\n?', line)]
