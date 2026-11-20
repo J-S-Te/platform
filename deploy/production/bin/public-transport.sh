@@ -127,19 +127,31 @@ public_transport_private_key_hash() {
     | sha256sum | awk '{print $1}'
 }
 
+# 用途：校验部署证书的有效期、端点身份和私钥匹配关系。
+# 参数：label 为入口名称，certificate 和 private_key 为证书链、私钥路径，host 为公开主机。
+# 返回值：校验成功返回 0，材料无效或主机不匹配时返回非零。
 public_transport_validate_pair() {
-  local label="$1" certificate="$2" private_key="$3" host="$4"
+  local label="$1" certificate="$2" private_key="$3" host="$4" identity_flag=-verify_hostname
   openssl crl2pkcs7 -nocrl -certfile "$certificate" 2>/dev/null \
     | openssl pkcs7 -print_certs -noout >/dev/null 2>&1 \
     || public_transport_fail "${label}证书链无法解析" || return 1
   openssl x509 -in "$certificate" -noout -checkend 0 >/dev/null 2>&1 \
     || public_transport_fail "${label}证书已过期、尚未生效或无法解析" || return 1
-  openssl x509 -in "$certificate" -noout -checkhost "$host" >/dev/null 2>&1 \
-    || public_transport_fail "${label}证书不覆盖域名 ${host}" || return 1
+  if public_transport_is_ip "$host"; then
+    identity_flag=-verify_ip
+    host="${host#[}"
+    host="${host%]}"
+  fi
+  openssl verify -partial_chain -trusted "$certificate" "$identity_flag" "$host" \
+    "$certificate" >/dev/null 2>&1 \
+    || public_transport_fail "${label}证书未覆盖公开主机 ${host} 或尚未生效" || return 1
   [[ "$(public_transport_certificate_key_hash "$certificate")" == "$(public_transport_private_key_hash "$private_key")" ]] \
     || public_transport_fail "${label}证书与私钥不匹配" || return 1
 }
 
+# 用途：解析公开端点、浏览器会话策略和网关所需的证书配置。
+# 参数：deploy_dir 为部署根目录，runtime_file 为可选运行配置路径。
+# 返回值：校验成功后导出解析值，端口、地址或证书配置无效时返回非零。
 public_transport_prepare() {
   local deploy_dir="$1" runtime_file="${2:-$1/.env}"
 	local enabled transition_state tls_required platform_host sso_host http_port https_port sso_http_port sso_https_port access_mode keycloak_port
@@ -181,8 +193,6 @@ public_transport_prepare() {
 		ip)
 			public_transport_is_ip "$platform_host" && public_transport_is_ip "$sso_host" \
 				|| public_transport_fail "IP 模式必须配置有效 IPv4 或 IPv6 地址" || return 1
-			[[ "$tls_required" == false ]] \
-				|| public_transport_fail "IP 模式暂不支持 HTTPS；请配置域名和证书" || return 1
 			export PUBLIC_FRONTEND_SSO_HOST=sso.invalid
 			;;
 		domain)
@@ -216,6 +226,13 @@ public_transport_prepare() {
 	if [[ "$access_mode" == ip ]]; then
 		[[ "$sso_http_port" != "$http_port" ]] || public_transport_fail "IP 模式平台与 SSO 端口不能相同" || return 1
 	fi
+  export PUBLIC_FRONTEND_SSO_TLS_PUBLISH=""
+  export PUBLIC_KEYCLOAK_HTTP_BIND_ADDRESS=""
+  if [[ "$access_mode" == ip && "$tls_required" == true ]]; then
+    public_transport_configure_ip_tls "$runtime_file" "$platform_host" "$sso_host" \
+      "$http_port" "$sso_http_port" "$https_port" "$sso_https_port" || return 1
+    if [[ "$enabled" == true ]]; then export PUBLIC_KEYCLOAK_HTTP_BIND_ADDRESS=127.0.0.1; fi
+  fi
 
 	export PUBLIC_ACCESS_MODE="$access_mode"
   export PUBLIC_HTTPS_ENABLED="$enabled"
@@ -292,6 +309,41 @@ public_transport_prepare() {
   export PUBLIC_KEYCLOAK_ISSUER="${PUBLIC_SSO_ORIGIN}/realms/${realm}"
 }
 
+# 用途：为同一公网 IP 上的平台和 SSO 分配独立的 TLS 公开端口。
+# 参数：运行配置路径、两个公开主机、平台及 SSO 的 HTTP 端口和 HTTPS 端口。
+# 返回值：成功后导出 SSO 网关绑定，地址或端口冲突时返回非零。
+public_transport_configure_ip_tls() {
+  local file="$1" platform_host="$2" sso_host="$3" http_port="$4" sso_http_port="$5"
+  local https_port="$6" sso_https_port="$7" bind_address port
+  [[ "$platform_host" == "$sso_host" ]] \
+    || public_transport_fail 'IP HTTPS 模式要求平台和 SSO 使用同一公开 IP' || return 1
+  [[ "$https_port" != "$sso_https_port" ]] \
+    || public_transport_fail 'IP HTTPS 模式要求平台和 SSO 使用不同 TLS 端口' || return 1
+  for port in "$https_port" "$sso_https_port"; do
+    [[ "$port" != "$http_port" && "$port" != "$sso_http_port" ]] \
+      || public_transport_fail "公开 TLS 端口 ${port} 与 HTTP 端口冲突" || return 1
+  done
+  bind_address="$(public_transport_tls_bind_address "$file")" || return 1
+  export PUBLIC_FRONTEND_SSO_HOST="$sso_host"
+  export PUBLIC_FRONTEND_SSO_TLS_PUBLISH="${bind_address}:${sso_https_port}:444"
+}
+
+# 用途：解析 TLS 发布绑定，允许与 HTTP 绑定地址分开配置。
+# 参数：file 为部署运行配置路径。
+# 返回值：标准输出可用于发布的 IP 地址，地址无效时返回非零。
+public_transport_tls_bind_address() {
+  local file="$1" address
+  address="$(public_transport_env_value "$file" PUBLIC_HTTPS_BIND_ADDRESS)"
+  if [[ -z "$address" ]]; then
+    address="$(public_transport_env_value "$file" FRONTEND_BIND_ADDRESS)"
+  fi
+  address="${address:-127.0.0.1}"
+  public_transport_is_ip "$address" \
+    || public_transport_fail 'TLS 监听绑定必须使用有效 IP 地址' || return 1
+  if [[ "$address" == *:* && "$address" != \[*\] ]]; then address="[$address]"; fi
+  printf '%s' "$address"
+}
+
 # 公开传输键在部署期才能算出（主机/端口/HTTPS 开关组合），编排侧用 Compose 必填语法（:?）
 # 要求它们显式存在。因此部署脚本必须把最终解析值持久化到部署目录的运行配置，否则任何绕过
 # deploy.sh 的 `docker compose --env-file .env --env-file .release.env up -d` 都会直接失败，
@@ -299,18 +351,30 @@ public_transport_prepare() {
 #
 # 参数：$1 运行配置文件（部署目录的 .env，0600）。
 # 返回值：写入并自校验成功返回 0；目标不是普通文件、无可持久化值或写入失败返回非 0。
+# 用途：在运行配置中持久化已校验的公开传输派生值，供后续发布使用。
+# 参数：file 为部署运行配置路径。
+# 返回值：写入并回读成功返回 0，文件不安全或写入失败时返回非零。
 public_transport_persist() {
   local file="$1" mode temporary line key value desired=()
-  local managed='PUBLIC_PLATFORM_ORIGIN PUBLIC_SSO_ORIGIN PUBLIC_KEYCLOAK_ISSUER PUBLIC_FRONTEND_SSO_HOST
-    PUBLIC_TRANSPORT_COOKIE_SECURE PUBLIC_TRANSPORT_ALLOW_INSECURE_HTTP
-    PUBLIC_TRANSPORT_KEYCLOAK_REQUIRE_HTTPS'
+  local managed='PUBLIC_PLATFORM_ORIGIN PUBLIC_SSO_ORIGIN PUBLIC_KEYCLOAK_ISSUER PUBLIC_FRONTEND_SSO_HOST'
+  managed+=' PUBLIC_TRANSPORT_COOKIE_SECURE PUBLIC_TRANSPORT_ALLOW_INSECURE_HTTP'
+  managed+=' PUBLIC_TRANSPORT_KEYCLOAK_REQUIRE_HTTPS PUBLIC_FRONTEND_SSO_TLS_PUBLISH'
+  managed+=' PUBLIC_KEYCLOAK_HTTP_BIND_ADDRESS'
   [[ -n "$file" ]] || { public_transport_fail '缺少公开传输持久化目标运行配置' || return 1; }
+  [[ -n "${PUBLIC_PLATFORM_ORIGIN:-}" && -n "${PUBLIC_SSO_ORIGIN:-}" ]] \
+    || { public_transport_fail '未解析平台或 SSO 的公开 Origin' || return 1; }
   if [[ -L "$file" || ! -f "$file" ]]; then
     public_transport_fail "公开传输持久化目标必须是普通文件（拒绝符号链接）：${file}" || return 1
   fi
   # 未解析的值不写入：由编排的必填校验失败关闭，绝不写猜测值或默认值。
   for key in $managed; do
     value="${!key:-}"
+    if [[ "$key" == PUBLIC_FRONTEND_SSO_TLS_PUBLISH || "$key" == PUBLIC_KEYCLOAK_HTTP_BIND_ADDRESS ]] \
+      && [[ "${!key+x}" == x ]]; then
+      # HTTP 和域名模式必须撤销上一次 IP 模式生成的发布映射。
+      desired+=("${key}=${value}")
+      continue
+    fi
     [[ -n "$value" ]] || continue
     [[ "$value" != *$'\n'* ]] || { public_transport_fail "拒绝写入含换行的 ${key}" || return 1; }
     desired+=("${key}=${value}")

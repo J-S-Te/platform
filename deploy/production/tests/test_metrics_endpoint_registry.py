@@ -57,7 +57,11 @@ STATUS_REGEX_SELECTOR = re.compile(r'status\s*(?:=~|!~)\s*"([^"]*)"')
 STATUS_NUMERIC_SELECTOR = re.compile(r"status\s*(?:>=|<=|>|<)\s*\d")
 STATUS_5XX_EQUALITY = re.compile(r'status\s*=\s*"5xx"')
 # 只允许回环绑定的两种写法（与 test-compose-orchestration-consistency.py 的既有约定一致）。
-LOOPBACK_PREFIXES = ("127.0.0.1:", "${KEYCLOAK_BIND_ADDRESS:-127.0.0.1}")
+LOOPBACK_PREFIXES = (
+    "127.0.0.1:",
+    "${KEYCLOAK_BIND_ADDRESS:-127.0.0.1}",
+    "${PUBLIC_KEYCLOAK_HTTP_BIND_ADDRESS:-${KEYCLOAK_BIND_ADDRESS:-127.0.0.1}}",
+)
 # 带 {status} 分桶标签的 HTTP 指标：表达式里的 status 选择器必须是等值桶名。
 HTTP_STATUS_METRICS = ("platform_http_errors_total", "platform_http_requests_total")
 
@@ -643,8 +647,7 @@ class MetricsEndpointRegistryTest(unittest.TestCase):
                 for entry in published:
                     if not entry.startswith(LOOPBACK_PREFIXES):
                         problems.append(
-                            "%s: %s 的端口 %s 不是回环绑定（只允许 127.0.0.1:/"
-                            "${KEYCLOAK_BIND_ADDRESS:-127.0.0.1}）"
+                            "%s: %s 的端口 %s 不是受支持的回环绑定"
                             % (job, service, entry)
                         )
         self.assertEqual(

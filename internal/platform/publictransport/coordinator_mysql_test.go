@@ -13,6 +13,9 @@ import (
 	"gorm.io/gorm"
 )
 
+// TestCoordinatorMySQLCutoverAndRecovery 验证回调切换、中文应用名以及切换恢复。
+// 参数：t 为使用隔离 MySQL 的测试上下文。
+// 返回值：无，迁移或断言失败时终止测试。
 func TestCoordinatorMySQLCutoverAndRecovery(t *testing.T) {
 	dsn := os.Getenv("PUBLIC_TRANSPORT_TEST_DSN")
 	if dsn == "" {
@@ -33,13 +36,38 @@ func TestCoordinatorMySQLCutoverAndRecovery(t *testing.T) {
 	}
 	now := time.Date(2026, 9, 21, 8, 0, 0, 0, time.UTC)
 	appID, envID, clientID := "01KPTAPP000000000000000001", "01KPTENV000000000000000001", "01KPTOAUTH0000000000000001"
-	if err := db.Table("platform_application").Create(map[string]any{"id": appID, "tenant_id": tenantID, "code": "transport_test", "name": "Transport Test", "application_type": "BUSINESS", "homepage_url": "http://platform.example.test/app", "status": "ACTIVE", "version": 1, "created_at": now, "updated_at": now}).Error; err != nil {
+	const displayName = "传输切换验收"
+	const keycloakClientID = "transport-keycloak-test"
+	if err := db.Table("platform_application").Create(map[string]any{"id": appID, "tenant_id": tenantID, "code": "transport_test", "name": displayName, "application_type": "BUSINESS", "homepage_url": "http://platform.example.test/app", "status": "ACTIVE", "version": 1, "created_at": now, "updated_at": now}).Error; err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Table("platform_application_environment").Create(map[string]any{"id": envID, "tenant_id": tenantID, "application_id": appID, "environment": "test", "base_url": "http://platform.example.test", "path_prefix": "/app", "status": "ACTIVE", "version": 1, "created_at": now, "updated_at": now}).Error; err != nil {
 		t.Fatal(err)
 	}
+	if err := db.Table("keycloak_application_client_mapping").Create(map[string]any{
+		"tenant_id": tenantID, "application_id": appID, "environment_id": envID,
+		"realm": "basic-platform", "keycloak_client_id": keycloakClientID,
+		"status": "SYNCED", "created_at": now, "updated_at": now,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
 	if err := db.Table("platform_oauth_client").Create(map[string]any{"id": clientID, "tenant_id": tenantID, "application_id": appID, "environment_id": envID, "client_id": "transport-test", "client_name": "Transport Test", "client_type": "PUBLIC", "token_auth_method": "none", "access_token_ttl_seconds": 300, "refresh_token_ttl_seconds": 3600, "require_pkce": true, "status": "ACTIVE", "version": 1, "created_at": now, "updated_at": now}).Error; err != nil {
+		t.Fatal(err)
+	}
+	const brokerID = "01KPTBROKER000000000000001"
+	const sourceBroker = "http://sso.example.test/realms/basic-platform/broker/basic-platform/endpoint"
+	const targetBroker = "https://sso.example.test/realms/basic-platform/broker/basic-platform/endpoint"
+	if err := db.Table("platform_oauth_client").Create(map[string]any{
+		"id": brokerID, "tenant_id": tenantID, "application_id": appID, "environment_id": envID,
+		"client_id": "keycloak-broker", "client_name": "Keycloak Broker", "client_type": "CONFIDENTIAL",
+		"token_auth_method": "client_secret_basic", "access_token_ttl_seconds": 300, "refresh_token_ttl_seconds": 3600,
+		"status": "ACTIVE", "version": 1, "created_at": now, "updated_at": now,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Table("platform_oauth_redirect_uri").Create(map[string]any{
+		"oauth_client_id": brokerID, "redirect_uri": sourceBroker, "created_at": now,
+	}).Error; err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Table("platform_oauth_redirect_uri").Create(map[string]any{"oauth_client_id": clientID, "redirect_uri": "http://platform.example.test/app/auth/callback", "created_at": now}).Error; err != nil {
@@ -58,9 +86,12 @@ func TestCoordinatorMySQLCutoverAndRecovery(t *testing.T) {
 	if _, err := coordinator.Initialize(ctx, ModeHTTP, "http://platform.example.test", "http://sso.example.test"); err != nil {
 		t.Fatal(err)
 	}
-	transition, _, err := coordinator.Begin(ctx, BeginInput{TargetMode: ModeHTTPS, TargetPlatformOrigin: "https://platform.example.test", TargetSSOOrigin: "https://sso.example.test"})
+	transition, clients, err := coordinator.Begin(ctx, BeginInput{TargetMode: ModeHTTPS, TargetPlatformOrigin: "https://platform.example.test", TargetSSOOrigin: "https://sso.example.test"})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if len(clients) != 1 || clients[0].ClientID != keycloakClientID || clients[0].Name != displayName {
+		t.Fatalf("unexpected Keycloak callback metadata: %+v", clients)
 	}
 	resumed, _, err := coordinator.Begin(ctx, BeginInput{TargetMode: ModeHTTPS, TargetPlatformOrigin: "https://platform.example.test", TargetSSOOrigin: "https://sso.example.test"})
 	if err != nil || resumed.ID != transition.ID {
@@ -81,6 +112,26 @@ func TestCoordinatorMySQLCutoverAndRecovery(t *testing.T) {
 	}
 	if err := coordinator.Finalize(ctx, transition.ID); err != nil {
 		t.Fatal(err)
+	}
+	latest, err := coordinator.LastCompleted(ctx)
+	if err != nil || latest.ID != transition.ID || latest.SourceSSOOrigin != "http://sso.example.test" {
+		t.Fatalf("completed transition=%+v err=%v", latest, err)
+	}
+	var brokerRedirects []string
+	if err := db.Table("platform_oauth_redirect_uri").Where("oauth_client_id = ?", brokerID).
+		Pluck("redirect_uri", &brokerRedirects).Error; err != nil || len(brokerRedirects) != 1 || brokerRedirects[0] != targetBroker {
+		t.Fatalf("broker callback after cutover=%v err=%v", brokerRedirects, err)
+	}
+	if err := db.Table("platform_oauth_redirect_uri").Where("oauth_client_id = ?", brokerID).
+		Update("redirect_uri", sourceBroker).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := coordinator.ReconcileBrokerCallbacks(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Table("platform_oauth_redirect_uri").Where("oauth_client_id = ?", brokerID).
+		Pluck("redirect_uri", &brokerRedirects).Error; err != nil || len(brokerRedirects) != 1 || brokerRedirects[0] != targetBroker {
+		t.Fatalf("broker callback after recovery=%v err=%v", brokerRedirects, err)
 	}
 	state, err := coordinator.Status(ctx)
 	if err != nil || state.State != StateHTTPS || state.PlatformOrigin != "https://platform.example.test" {

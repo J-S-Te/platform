@@ -1058,7 +1058,8 @@ class OrchestrationConsistencyTest(unittest.TestCase):
                     # 只允许 127.0.0.1 绑定或显式回环变量；0.0.0.0/公网网卡一律拒绝。
                     self.assertTrue(
                         text.startswith("127.0.0.1:")
-                        or text.startswith("${KEYCLOAK_BIND_ADDRESS:-127.0.0.1}"),
+                        or text.startswith("${KEYCLOAK_BIND_ADDRESS:-127.0.0.1}")
+                        or text.startswith("${PUBLIC_KEYCLOAK_HTTP_BIND_ADDRESS:-${KEYCLOAK_BIND_ADDRESS:-127.0.0.1}}"),
                         f"{CANONICAL} 的 {name} 把指标端口 {metrics_port} 发布为 {text!r}；"
                         "只能绑定回环地址，供本机受控验收（见 ACCEPTANCE_CHECKLIST.md）",
                     )

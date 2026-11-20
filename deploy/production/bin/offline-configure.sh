@@ -61,9 +61,18 @@ configuration_material_exists() {
   return 1
 }
 
+# 用途：确认目标监听绑定可用，允许同一端口在另一 IP 上被独立使用。
+# 参数：port 为端口，container 为预期所有者，address 为可选的具体绑定地址。
+# 返回值：监听无冲突时成功，检查失败或出现非预期占用时终止配置。
 configuration_check_port() {
-  local port="$1" container="$2" listeners mapped
+  local port="$1" container="$2" address="${3:-}" listeners mapped
   listeners="$(ss -H -ltn "sport = :$port")" || die "无法检查 TCP 端口 $port"
+  case "$address" in
+    ''|0.0.0.0|'[::]') ;;
+    *) listeners="$(awk -v port="$port" -v address="$address" '
+         $4 == address ":" port || $4 == "0.0.0.0:" port || $4 == "*:" port || $4 == "[::]:" port
+       ' <<<"$listeners")" ;;
+  esac
   [[ -n "$listeners" ]] || return 0
   mapped="$(docker container inspect --format '{{range .NetworkSettings.Ports}}{{range .}}{{println .HostPort}}{{end}}{{end}}' "$container" 2>/dev/null || true)"
   if ! printf '%s\n' "$mapped" | awk -v p="$port" '$0 == p {found=1} END {exit found ? 0 : 1}'; then
@@ -71,6 +80,9 @@ configuration_check_port() {
   fi
 }
 
+# 用途：按公开监听地址为部署入口添加宿主机防火墙规则。
+# 参数：file 为可选的已解析运行配置路径。
+# 返回值：处理成功返回 0，规则或防火墙状态无法核对时终止配置。
 configure_firewall() {
   local file="${1:-$runtime_file}" port bind zone backend='' state http_port https_port keycloak_port
   local -a ports=() zones=()
@@ -81,9 +93,19 @@ configure_firewall() {
   bind="$(env_get "$file" FRONTEND_BIND_ADDRESS)"; bind="${bind:-127.0.0.1}"
   if configuration_bound_publicly "$bind"; then
     ports+=("$http_port")
-    if [[ "$(env_get "$file" PUBLIC_HTTPS_ENABLED)" == true || "$(env_get "$file" PUBLIC_TRANSPORT_STATE)" == DISABLING_HTTPS ]]; then ports+=("$https_port"); fi
   fi
-  bind="$(env_get "$file" KEYCLOAK_BIND_ADDRESS)"; bind="${bind:-127.0.0.1}"
+  if [[ "$(env_get "$file" PUBLIC_HTTPS_ENABLED)" == true || "$(env_get "$file" PUBLIC_TRANSPORT_STATE)" == DISABLING_HTTPS ]]; then
+    bind="$(public_transport_tls_bind_address "$file")" || die '无法解析 TLS 绑定地址'
+    if configuration_bound_publicly "$bind"; then
+      ports+=("$https_port")
+      if [[ -n "$(env_get "$file" PUBLIC_FRONTEND_SSO_TLS_PUBLISH)" ]]; then
+        ports+=("$(env_get "$file" PUBLIC_SSO_HTTPS_PORT)")
+      fi
+    fi
+  fi
+  bind="$(env_get "$file" PUBLIC_KEYCLOAK_HTTP_BIND_ADDRESS)"
+  if [[ -z "$bind" ]]; then bind="$(env_get "$file" KEYCLOAK_BIND_ADDRESS)"; fi
+  bind="${bind:-127.0.0.1}"
   if configuration_bound_publicly "$bind"; then ports+=("$keycloak_port"); fi
   if ((${#ports[@]} == 0)); then
     printf '公开入口仅绑定回环地址，未新增防火墙放行规则。\n'
@@ -133,7 +155,8 @@ configure() (
   ((BASH_VERSINFO[0] > 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 3))) || die 'configure 需要 Bash 4.3 或以上'
   ((EUID == 0)) || die '请使用 root 或 sudo 执行 configure，以正确设置容器目录权限'
   local command_name force=false first=false saved=false imported=false staging backup='' actual_runtime="$runtime_file"
-  local host old_host mode frontend_port old_frontend platform_port old_platform keycloak_port old_keycloak https_port admin monitoring key runtime_name keys_dir gateway_root private public derived
+  local host old_host mode frontend_port old_frontend platform_port old_platform keycloak_port
+  local old_keycloak https_port bind admin monitoring key runtime_name keys_dir gateway_root private public derived
   for command_name in docker openssl awk install stat chown flock ss cmp; do need "$command_name"; done
   while (($#)); do case "$1" in --force) force=true ;; *) die "configure 未知参数：$1" ;; esac; shift; done
   for runtime_name in runtime data backups logs manifests packages; do
@@ -224,7 +247,12 @@ configure() (
   if [[ "$PUBLIC_HTTPS_ENABLED" == true || "$PUBLIC_TRANSPORT_STATE" == DISABLING_HTTPS ]]; then
     https_port="$PUBLIC_HTTPS_PORT"
     [[ "$https_port" != "$frontend_port" && "$https_port" != "$platform_port" && "$https_port" != "$keycloak_port" ]] || die 'HTTPS 端口不能与 HTTP、API、Keycloak 端口重复'
-    configuration_check_port "$https_port" uip-frontend
+    bind="$(public_transport_tls_bind_address "$runtime_file")" || die '无法解析 TLS 绑定地址'
+    configuration_check_port "$https_port" uip-frontend "$bind"
+    if [[ -n "$PUBLIC_FRONTEND_SSO_TLS_PUBLISH" ]]; then
+      [[ "$PUBLIC_SSO_HTTPS_PORT" != "$platform_port" ]] || die 'SSO HTTPS 端口不能与 API 端口重复'
+      configuration_check_port "$PUBLIC_SSO_HTTPS_PORT" uip-frontend "$bind"
+    fi
   fi
   if [[ "$mode" == ip ]]; then
     env_set "$runtime_file" KEYCLOAK_PUBLIC_URL "$PUBLIC_SSO_ORIGIN"

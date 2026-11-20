@@ -431,6 +431,9 @@ var managedCallbackTables = []callbackTablePlan{
 	{Table: "platform_oauth_backchannel_logout_uri", Column: "logout_uri", ResourceType: "OAUTH_BACKCHANNEL_LOGOUT", PrepareWritesTarget: false, ApplyDeletesSource: false},
 }
 
+// 用途：记录切换涉及的应用入口、回调和 Keycloak 客户端。
+// 参数：tx 为当前数据库事务，transition 为切换记录，now 为记录时间。
+// 返回值：资源登记成功时为 nil，查询或写入失败时返回错误。
 func prepareManagedResources(tx *gorm.DB, transition Transition, now time.Time) error {
 	var environments []environmentRow
 	if err := tx.Table("platform_application_environment").Select("id, tenant_id, application_id, base_url").Where("base_url IS NOT NULL AND base_url <> ''").Find(&environments).Error; err != nil {
@@ -461,9 +464,12 @@ func prepareManagedResources(tx *gorm.DB, transition Transition, now time.Time) 
 			return err
 		}
 	}
-	var mappings []struct{ TenantID, ApplicationID, EnvironmentID, ClientID, Name, BaseURL, PathPrefix string }
+	if err := stageBrokerCallbacks(tx, transition, now, true); err != nil {
+		return err
+	}
+	var mappings []struct{ TenantID, ApplicationID, EnvironmentID, ClientID, BaseURL, PathPrefix string }
 	query := `SELECT mapping.tenant_id, mapping.application_id, mapping.environment_id, mapping.keycloak_client_id AS client_id,
-        application.name, environment.base_url, COALESCE(environment.path_prefix, '') AS path_prefix
+        environment.base_url, COALESCE(environment.path_prefix, '') AS path_prefix
         FROM keycloak_application_client_mapping mapping
         JOIN platform_application application ON application.id = mapping.application_id AND application.tenant_id = mapping.tenant_id
         JOIN platform_application_environment environment ON environment.id = mapping.environment_id AND environment.application_id = mapping.application_id AND environment.tenant_id = mapping.tenant_id
@@ -477,8 +483,11 @@ func prepareManagedResources(tx *gorm.DB, transition Transition, now time.Time) 
 		if !ok {
 			continue
 		}
-		resourceID := row.ClientID + "|" + row.Name
-		if err := insertResource(tx, transition.ID, "KEYCLOAK_CLIENT", resourceID, row.TenantID, row.ApplicationID, row.EnvironmentID, source, target, now); err != nil {
+		// 资源主键使用 ASCII，仅登记客户端 ID。展示名称在读取时取自应用记录。
+		if len(row.ClientID) == 0 || len(row.ClientID) > 191 {
+			return errors.New("Keycloak client identifier does not fit the transport resource key")
+		}
+		if err := insertResource(tx, transition.ID, "KEYCLOAK_CLIENT", row.ClientID, row.TenantID, row.ApplicationID, row.EnvironmentID, source, target, now); err != nil {
 			return err
 		}
 	}
@@ -713,18 +722,39 @@ func rollbackPreparedResources(tx *gorm.DB, transition Transition) error {
 	return nil
 }
 
+// 用途：读取切换登记的 Keycloak 客户端及新旧回调。
+// 参数：tx 为当前数据库句柄，transitionID 为切换记录标识。
+// 返回值：客户端列表或查询错误，兼容旧记录中拼接的展示名。
 func loadKeycloakResources(tx *gorm.DB, transitionID string) ([]KeycloakClient, error) {
-	type row struct{ TenantID, ApplicationID, EnvironmentID, ResourceID, SourceValue, TargetValue string }
+	type row struct {
+		TenantID, ApplicationID, EnvironmentID, ResourceID string
+		SourceValue, TargetValue, ApplicationName          string
+	}
 	var rows []row
-	err := tx.Table("platform_public_transport_resource").Select("tenant_id, application_id, environment_id, resource_id, source_value, target_value").Where("transition_id = ? AND resource_type = 'KEYCLOAK_CLIENT'", transitionID).Find(&rows).Error
+	err := tx.Table("platform_public_transport_resource AS resource").
+		Select(`resource.tenant_id, resource.application_id, resource.environment_id,
+			resource.resource_id, resource.source_value, resource.target_value,
+			COALESCE(application.name, '') AS application_name`).
+		Joins(`LEFT JOIN platform_application AS application
+			ON application.id = resource.application_id AND application.tenant_id = resource.tenant_id`).
+		Where("resource.transition_id = ? AND resource.resource_type = 'KEYCLOAK_CLIENT'", transitionID).
+		Find(&rows).Error
+	if err != nil {
+		return nil, err
+	}
 	clients := make([]KeycloakClient, 0, len(rows))
 	for _, item := range rows {
-		parts := strings.SplitN(item.ResourceID, "|", 2)
-		name := parts[0]
-		if len(parts) == 2 {
-			name = parts[1]
+		clientID, legacyName, legacy := strings.Cut(item.ResourceID, "|")
+		name := item.ApplicationName
+		if legacy {
+			name = legacyName
+		} else if name == "" {
+			name = clientID
 		}
-		clients = append(clients, KeycloakClient{TenantID: item.TenantID, ApplicationID: item.ApplicationID, EnvironmentID: item.EnvironmentID, ClientID: parts[0], Name: name, SourceRedirectURI: item.SourceValue, TargetRedirectURI: item.TargetValue})
+		clients = append(clients, KeycloakClient{
+			TenantID: item.TenantID, ApplicationID: item.ApplicationID, EnvironmentID: item.EnvironmentID,
+			ClientID: clientID, Name: name, SourceRedirectURI: item.SourceValue, TargetRedirectURI: item.TargetValue,
+		})
 	}
-	return clients, err
+	return clients, nil
 }

@@ -341,7 +341,9 @@ SSO_TLS_PRIVATE_KEY_PATH=
 
 `PUBLIC_SSO_HTTP_PORT` 和 `PUBLIC_SSO_HTTPS_PORT` 允许 Keycloak 与平台入口使用不同端口；留空时分别继承平台的 HTTP/HTTPS 端口。IP 直连部署应显式配置，例如平台使用 `8081`、Keycloak 使用 `18090`，避免 OIDC Issuer 被错误改写为平台端口。
 
-启用 HTTPS 时，将 `PUBLIC_HTTPS_ENABLED` 改为 `true`，填写平台证书链和私钥路径。若 SSO 两项留空，SSO 复用平台证书，因此平台证书的 SAN 必须同时覆盖两个域名；也可以为 SSO 填写独立证书链和私钥。路径支持 Certbot 的符号链接，发布前会解析到可读常规文件，并校验证书链可解析、有效期、SAN 与私钥匹配。预检失败不会执行 Docker 变更。
+启用 HTTPS 时，将 `PUBLIC_HTTPS_ENABLED` 改为 `true`，填写平台证书链和私钥路径。若 SSO 两项留空，SSO 复用平台证书，平台证书必须覆盖两个公开入口的域名或 IP。也可以为 SSO 填写独立证书链和私钥。路径支持 Certbot 的符号链接，发布前会解析到可读常规文件，并校验证书链可解析、有效期、公开身份与私钥匹配。预检失败不会执行 Docker 变更。
+
+纯 IP HTTPS 使用 `PUBLIC_ACCESS_MODE=ip`，平台和 SSO 填写同一公网 IP，并分别指定 `PUBLIC_HTTPS_PORT` 与 `PUBLIC_SSO_HTTPS_PORT`。证书需包含 `IP Address` 类型的 SAN。HTTP 跳转自动携带平台的 TLS 端口，Keycloak 的直连 HTTP 绑定收敛到回环。需要区分宿主网卡和回环绑定时，通过 `PUBLIC_HTTPS_BIND_ADDRESS` 指定 TLS 绑定地址。切换前确认两个 TLS 端口都能从使用方网络访问。
 
 ```bash
 cd /opt/unified-identity-platform
@@ -357,12 +359,14 @@ HTTPS 降级不会立即卸载证书。状态进入 `DISABLING_HTTPS` 后，统�
 
 统一发布入口仅使用 `docker-compose.yml`，从传输配置派生 Origin、Issuer、回调和 Cookie 设置；HTTPS/排空由同一 frontend 服务与受管证书目录实现。
 
-证书续期后只需执行以下命令重新校验证书并重建网关，不重启业务 API：
+证书续期后执行以下命令，校验证书并在需要更新时平滑重载前端网关。
 
 ```bash
 cd /opt/unified-identity-platform
 ./bin/reload-public-certificate.sh
 ```
+
+短期 IP 证书应配置定时续期与证书同步。可以在 `certbot renew` 成功后定时调用该命令，若同一证书已在运行，命令会直接返回。若续期成功但同步暂时失败，下次定时执行会重新同步磁盘与网关证书。
 
 本地开发同样支持该开关，配置位于 `platform/docker/.env.local`；默认仍保持 `http://localhost:8081`，只有显式启用 HTTPS 才加载 `platform/compose.https.yaml`。排空状态由协调器提供，`PUBLIC_TRANSPORT_STATE` 是内部恢复字段，不能作为日常开关手工长期保留。
 

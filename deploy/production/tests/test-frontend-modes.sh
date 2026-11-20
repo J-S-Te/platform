@@ -51,3 +51,40 @@ for mode in HTTP HTTPS DISABLING_HTTPS; do
   container=""
   echo "PASS: $mode gateway starts without backends; missing subsystem returns unavailable"
 done
+
+openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=test \
+  -addext 'subjectAltName=IP:192.0.2.20' \
+  -keyout "$fixture/platform.key" -out "$fixture/platform.crt" >/dev/null 2>&1
+cp "$fixture/platform.key" "$fixture/sso.key"
+cp "$fixture/platform.crt" "$fixture/sso.crt"
+container="$(docker run -d --network "$network" --label uip.test=unified-compose \
+  -e PUBLIC_HTTPS_ENABLED=true -e PUBLIC_PLATFORM_HOST=192.0.2.20 -e PUBLIC_SSO_HOST=192.0.2.20 \
+  -e PUBLIC_HTTPS_PORT=18081 -e PUBLIC_SSO_HTTPS_PORT=18445 \
+  -v "$fixture:/run/tls:ro" "$image")"
+ready=false
+for ((attempt=0; attempt<15; attempt++)); do
+  if docker exec "$container" curl -fsS --max-time 2 http://127.0.0.1:8088/ >/dev/null 2>&1; then
+    ready=true
+    break
+  fi
+  if [[ "$(docker inspect "$container" --format '{{.State.Running}}')" == false ]]; then break; fi
+  sleep 1
+done
+[[ "$ready" == true ]] || { docker logs "$container"; exit 1; }
+docker exec "$container" nginx -t
+redirect="$(docker exec "$container" curl -sS -o /dev/null -w '%{redirect_url}' \
+  -H 'Host: 192.0.2.20:8081' 'http://127.0.0.1/project_management/?from=http')"
+[[ "$redirect" == 'https://192.0.2.20:18081/project_management/?from=http' ]]
+docker exec "$container" curl -fsS --max-time 5 --cacert /run/tls/platform.crt \
+  --connect-to 192.0.2.20:18081:127.0.0.1:443 https://192.0.2.20:18081/ >/dev/null
+subsystem_redirect="$(docker exec "$container" curl -fsS --max-time 5 --cacert /run/tls/platform.crt \
+  --connect-to 192.0.2.20:18081:127.0.0.1:443 -o /dev/null -w '%{redirect_url}' \
+  https://192.0.2.20:18081/project_management)"
+[[ "$subsystem_redirect" == 'https://192.0.2.20:18081/project_management/' ]] || {
+  echo "子系统跳转脱离 HTTPS 入口：${subsystem_redirect}" >&2; exit 1
+}
+sso_admin_status="$(docker exec "$container" curl -sS --max-time 5 --cacert /run/tls/sso.crt \
+  --connect-to 192.0.2.20:18445:127.0.0.1:444 -o /dev/null -w '%{http_code}' \
+  https://192.0.2.20:18445/admin/)"
+[[ "$sso_admin_status" == 404 ]]
+echo 'PASS: IP HTTPS uses the configured redirect port and a separate restricted SSO TLS listener'

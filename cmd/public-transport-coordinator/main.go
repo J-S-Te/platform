@@ -35,7 +35,7 @@ func main() {
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: public-transport-coordinator <init|prepare|commit|fail|abort|status>")
+		return errors.New("usage: public-transport-coordinator <init|prepare|commit|fail|abort|status|last-completed|reconcile-broker>")
 	}
 	cfg, err := config.Load()
 	if err != nil {
@@ -161,6 +161,26 @@ func run(args []string) error {
 			return err
 		}
 		return failTransition(ctx, cfg, coordinator, request)
+	case "last-completed":
+		if len(args) != 1 {
+			return errors.New("last-completed takes no arguments")
+		}
+		transition, err := coordinator.LastCompleted(ctx)
+		if err != nil {
+			return err
+		}
+		return json.NewEncoder(os.Stdout).Encode(map[string]string{
+			"SourcePlatformOrigin": transition.SourcePlatformOrigin,
+			"SourceSSOOrigin":      transition.SourceSSOOrigin,
+		})
+	case "reconcile-broker":
+		if len(args) != 1 {
+			return errors.New("reconcile-broker takes no arguments")
+		}
+		if err := coordinator.ReconcileBrokerCallbacks(ctx); err != nil {
+			return err
+		}
+		return json.NewEncoder(os.Stdout).Encode(map[string]string{"broker_callbacks": "reconciled"})
 	case "status":
 		state, err := coordinator.Status(ctx)
 		if err != nil {

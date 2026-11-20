@@ -177,9 +177,10 @@ ONLY_PRODUCTION = {
         "FRONTEND_BIND_ADDRESS",
         "FRONTEND_IPV4_ADDRESS",
     },
-    # 对外暴露与 TLS：本地走回环 HTTP；生产要公网域名、HTTPS 端口、证书路径与排空宽限。
-    "生产对外暴露与 TLS（域名/证书/排空）": {
+    # 本地 Compose 走回环 HTTP；生产编排支持公网主机、独立 TLS 绑定与排空。
+    "生产对外暴露与 TLS（主机/绑定/证书/排空）": {
         "PUBLIC_HTTPS_ENABLED",
+        "PUBLIC_HTTPS_BIND_ADDRESS",
         "PUBLIC_HTTPS_PORT",
         "PUBLIC_HTTP_PORT",
         "PUBLIC_HTTPS_DRAIN_GRACE",
