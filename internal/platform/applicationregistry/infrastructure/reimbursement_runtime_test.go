@@ -13,6 +13,28 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// TestProjectReimbursementEmptyBindings 验证未部署报销的项目允许两个用途 ClientID 为空。
+// 参数：t为测试上下文。
+// 返回值：无；开关为 false 时允许、true 时拒绝、绑定漂移时失败。
+func TestProjectReimbursementEmptyBindings(t *testing.T) {
+	bindings := map[string]string{
+		"REIMBURSEMENT_INTEGRATION_ENABLED": "reimbursement_integration_enabled",
+		"REIMBURSEMENT_REFERENCE_CLIENT_ID": reimbursementRelatedPrefix + application.ServiceCredentialReimbursementProjectReferenceRead + ".client_id",
+		"REIMBURSEMENT_SPEND_CLIENT_ID":     reimbursementRelatedPrefix + application.ServiceCredentialProjectReimbursementCostWrite + ".client_id",
+	}
+	allowed, err := projectReimbursementRuntimeEmptyBindings("project_management", bindings, map[string]string{"REIMBURSEMENT_INTEGRATION_ENABLED": "false"})
+	if err != nil || !allowed["REIMBURSEMENT_REFERENCE_CLIENT_ID"] || !allowed["REIMBURSEMENT_SPEND_CLIENT_ID"] {
+		t.Fatal(allowed, err)
+	}
+	if _, err = projectReimbursementRuntimeEmptyBindings("project_management", bindings, map[string]string{"REIMBURSEMENT_INTEGRATION_ENABLED": "true"}); err != nil {
+		t.Fatal(err)
+	}
+	bindings["REIMBURSEMENT_SPEND_CLIENT_ID"] = "tampered"
+	if _, err = projectReimbursementRuntimeEmptyBindings("project_management", bindings, map[string]string{"REIMBURSEMENT_INTEGRATION_ENABLED": "false"}); err == nil {
+		t.Fatal("tampered binding accepted")
+	}
+}
+
 // reimbursementInput 为临时运行配置构建用途分离且scope精确的合成凭据。
 // 参数：无。
 // 返回值：仅供本地测试的报销登记输入，不读取真实运行材料。
