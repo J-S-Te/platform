@@ -85,6 +85,45 @@ func projectReimbursementRuntimeValues(input application.SubsystemProvisioningIn
 	return nil
 }
 
+// projectReimbursementRuntimeEmptyBindings 在项目未启用报销集成时，允许两个用途 ClientID
+// 显式留空；否则旧版校验会把“未部署报销”误判为配置不完整。
+// 参数：code 为应用编码，bindings 为当前 profile 绑定，values 为运行配置。
+// 返回值：可空的绑定集合；绑定被篡改或开关值非法时返回错误。
+func projectReimbursementRuntimeEmptyBindings(code string, bindings, values map[string]string) (map[string]bool, error) {
+	allowed := map[string]bool{}
+	if code != "project_management" {
+		return allowed, nil
+	}
+	expected := map[string]string{
+		"REIMBURSEMENT_REFERENCE_CLIENT_ID": reimbursementRelatedPrefix + application.ServiceCredentialReimbursementProjectReferenceRead + ".client_id",
+		"REIMBURSEMENT_SPEND_CLIENT_ID":     reimbursementRelatedPrefix + application.ServiceCredentialProjectReimbursementCostWrite + ".client_id",
+	}
+	declared := false
+	for key := range expected {
+		if _, ok := bindings[key]; ok {
+			declared = true
+		}
+	}
+	if !declared {
+		return allowed, nil
+	}
+	for key, source := range expected {
+		if bindings[key] != source {
+			return nil, provisioningError("project reimbursement runtime binding mismatch")
+		}
+	}
+	switch values["REIMBURSEMENT_INTEGRATION_ENABLED"] {
+	case "false":
+		for key := range expected {
+			allowed[key] = true
+		}
+	case "true":
+	default:
+		return nil, provisioningError("project reimbursement enabled state is invalid")
+	}
+	return allowed, nil
+}
+
 // reimbursementLocalRuntimeValues 向报销本地运行文件投递独立用途凭据与公开接入配置。
 // 参数：input为受控登记输入，path为来源文件，values接收本次原子更新；fresh只用于区分调用来源，
 // 是否允许生成会话密钥一律以现有 MYSQL_DSN 是否为空为准（空=从未完成数据库交付）。

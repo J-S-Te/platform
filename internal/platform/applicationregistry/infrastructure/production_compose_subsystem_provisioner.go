@@ -552,6 +552,14 @@ func (target *productionComposeTarget) validateRuntimeIntegrationConfiguration()
 		for key := range costEmpty {
 			emptyBindings[key] = true
 		}
+		projectEmpty, err := projectReimbursementRuntimeEmptyBindings(
+			target.config.Profile.Manifest.Application.Code, runtimeFile.Bindings, values)
+		if err != nil {
+			return err
+		}
+		for key := range projectEmpty {
+			emptyBindings[key] = true
+		}
 		for key := range runtimeFile.Bindings {
 			if emptyBindings[key] && values[key] == "" {
 				continue
