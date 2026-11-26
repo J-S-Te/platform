@@ -18,8 +18,9 @@ type User struct {
 
 // Page 是负责人目录用户的确定性分页结果。
 type Page struct {
-	Items    []User `json:"items"`
-	Page     int    `json:"page"`
-	PageSize int    `json:"page_size"`
-	Total    int64  `json:"total"`
+	Items         []User `json:"items"`
+	Page          int    `json:"page"`
+	PageSize      int    `json:"page_size"`
+	Total         int64  `json:"total"`
+	UsernameMatch bool   `json:"username_match,omitempty"`
 }

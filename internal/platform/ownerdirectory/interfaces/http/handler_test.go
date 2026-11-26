@@ -50,6 +50,39 @@ func TestHandlerRejectsInvalidPagination(t *testing.T) {
 	}
 }
 
+// TestHandlerForwardsUsernameFilter 验证精确查询标识可见，登录用户名不进入返回对象。
+// 参数：t 为测试上下文。
+// 返回值：无。
+func TestHandlerForwardsUsernameFilter(t *testing.T) {
+	service := &directoryServiceStub{page: domain.Page{
+		Items: []domain.User{{ID: "user-1", DisplayName: "负责人甲"}}, UsernameMatch: true,
+	}}
+	handler := newTestHandler(t, service)
+	response := httptest.NewRecorder()
+	handler.List(response, authenticatedRequest("/api/v1/internal/owner-directory?username=engineer-1"))
+	if response.Code != http.StatusOK || service.query.Username != "engineer-1" {
+		t.Fatalf("status=%d query=%+v", response.Code, service.query)
+	}
+	body := response.Body.String()
+	if !strings.Contains(body, `"username_match":true`) || strings.Contains(body, "engineer-1") {
+		t.Fatalf("unexpected response body: %s", body)
+	}
+}
+
+// TestHandlerRejectsBlankOrRepeatedUsername 验证显式用户名过滤不会退化成无过滤目录查询。
+// 参数：t 为测试上下文。
+// 返回值：无。
+func TestHandlerRejectsBlankOrRepeatedUsername(t *testing.T) {
+	handler := newTestHandler(t, &directoryServiceStub{})
+	for _, query := range []string{"username=", "username=%20", "username=user1&username=user2"} {
+		response := httptest.NewRecorder()
+		handler.List(response, authenticatedRequest("/api/v1/internal/owner-directory?"+query))
+		if response.Code != http.StatusUnprocessableEntity {
+			t.Fatalf("query=%q response=%d", query, response.Code)
+		}
+	}
+}
+
 func TestHandlerPassesMachineScopeAndReturnsMinimalProjection(t *testing.T) {
 	service := &directoryServiceStub{page: domain.Page{
 		Items: []domain.User{{

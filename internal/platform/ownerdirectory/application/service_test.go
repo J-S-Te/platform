@@ -60,6 +60,30 @@ func TestListRejectsMixedFiltersAndNormalizesRepositoryFailures(t *testing.T) {
 	}
 }
 
+// TestListValidatesUsernameFilter 验证用户名过滤与目录原有搜索条件互斥。
+// 参数：t 为测试上下文。
+// 返回值：无。
+func TestListValidatesUsernameFilter(t *testing.T) {
+	repository := &repositoryStub{}
+	service, _ := NewService(repository)
+	for _, invalid := range []Query{
+		{Username: " "}, {Username: "账号"}, {Username: "a b"},
+		{Username: strings.Repeat("a", 129)},
+		{Username: "engineer-1", Keyword: "姓名"},
+		{Username: "engineer-1", UserID: "sub-1"},
+	} {
+		if _, err := service.List(context.Background(), validPrincipal(), invalid); !errors.Is(err, ErrValidation) {
+			t.Fatalf("query=%#v error=%v, want %v", invalid, err, ErrValidation)
+		}
+	}
+	if _, err := service.List(context.Background(), validPrincipal(), Query{Username: " engineer-1 "}); err != nil {
+		t.Fatal(err)
+	}
+	if repository.query.Username != "engineer-1" {
+		t.Fatalf("normalized username = %q", repository.query.Username)
+	}
+}
+
 // 角色来源过滤把候选人限定为岗位授权模板产生的人；取值必须显式且与角色码同时使用，
 // 否则拼写错误会被当成"没有过滤"，把管理员直接开通的例外绑定重新放回候选列表。
 func TestListNormalizesRoleOriginFilter(t *testing.T) {

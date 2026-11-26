@@ -29,10 +29,11 @@ var (
 // 未知取值一律拒绝，避免拼写错误被当成"没有过滤"而放大候选人范围。
 var roleGrantOrigins = map[string]struct{}{"TEMPLATE": {}, "MANUAL": {}, "SYSTEM": {}}
 
-// Query 承载可选的精确用户或显示名搜索过滤条件。
+// Query 承载可选的精确用户、登录用户名或显示名搜索过滤条件。
 type Query struct {
-	Keyword string
-	UserID  string
+	Keyword  string
+	UserID   string
+	Username string
 	// RoleCodes 只返回在这些应用角色上确有有效授权的用户。
 	RoleCodes []string
 	// RoleOrigins 进一步限定角色授权的来源（grant_origin）；必须与 RoleCodes 同时使用，
@@ -58,13 +59,24 @@ func NewService(repository Repository) (*Service, error) {
 	return &Service{repository: repository}, nil
 }
 
-// List 的租户与应用范围只来自已认证机器令牌，查询参数不能指定或扩大数据边界。
+// List 校验查询条件，并从已认证机器令牌取得目录授权范围。
+// 参数：ctx 为查询上下文，principal 为机器身份，query 为过滤和分页条件。
+// 返回值：当前应用环境可选人员分页；参数非法或目录不可用时返回错误。
 func (service *Service) List(ctx context.Context, principal appctx.Principal, query Query) (domain.Page, error) {
 	if !principal.Valid() {
 		return domain.Page{}, ErrValidation
 	}
 	query.Keyword = strings.TrimSpace(query.Keyword)
 	query.UserID = strings.TrimSpace(query.UserID)
+	if query.Username != "" {
+		query.Username = strings.TrimSpace(query.Username)
+		// iam_account.username 使用 ascii_bin。只允许可打印、非空白的 ASCII 字符。
+		invalidUsername := query.Username == "" || len(query.Username) > 128 ||
+			strings.IndexFunc(query.Username, func(value rune) bool { return value < '!' || value > '~' }) >= 0
+		if invalidUsername || query.Keyword != "" || query.UserID != "" {
+			return domain.Page{}, ErrValidation
+		}
+	}
 	seenRoles := make(map[string]struct{}, len(query.RoleCodes))
 	roles := make([]string, 0, len(query.RoleCodes))
 	for _, raw := range query.RoleCodes {

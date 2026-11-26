@@ -104,7 +104,16 @@ func (repository *Repository) List(ctx context.Context, tenantID, applicationID,
 			)`, applicationID, query.RoleCodes, query.RoleOrigins, now, now, environmentID)
 		}
 	}
-	if query.UserID != "" {
+	if query.Username != "" {
+		// 精确比对活跃人类账号，仍由外层授权查询限定用户和当前应用环境。
+		authorized = authorized.Where(`EXISTS (
+			SELECT 1 FROM iam_account AS account
+			WHERE account.tenant_id = user.tenant_id AND account.user_id = user.id
+			AND account.username = ? AND BINARY account.account_type = BINARY 'HUMAN'
+			AND BINARY account.status = BINARY 'ACTIVE'
+			AND (account.valid_until IS NULL OR account.valid_until > ?)
+		)`, query.Username, now)
+	} else if query.UserID != "" {
 		authorized = authorized.Where("user.id = ?", query.UserID)
 	} else if query.Keyword != "" {
 		// LIKE 通配符按字面转义，搜索词不能借助 % 或 _ 扩大结果集；精确用户 ID 仍可直接命中。
@@ -127,7 +136,10 @@ func (repository *Repository) List(ctx context.Context, tenantID, applicationID,
 	if err := authorized.Order("user.display_name ASC, user.id ASC").Offset((query.Page - 1) * query.PageSize).Limit(query.PageSize).Scan(&rows).Error; err != nil {
 		return domain.Page{}, err
 	}
-	result := domain.Page{Items: make([]domain.User, 0, len(rows)), Page: query.Page, PageSize: query.PageSize, Total: total}
+	result := domain.Page{
+		Items: make([]domain.User, 0, len(rows)), Page: query.Page, PageSize: query.PageSize,
+		Total: total, UsernameMatch: query.Username != "",
+	}
 	if len(rows) == 0 {
 		return result, nil
 	}
