@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/J-S-Te/Basic-Platform/internal/platform/bootstrapadmin"
 	"github.com/J-S-Te/Basic-Platform/internal/platform/ownerdirectory/application"
@@ -34,22 +35,30 @@ func NewHandler(service directoryService, logger *slog.Logger) (*Handler, error)
 	return &Handler{service: service, logger: logger}, nil
 }
 
-// List 返回符合过滤条件的可选负责人分页；只支持机器主体调用。
+// List 返回符合过滤条件的可选负责人分页，只支持机器主体调用。
+// 参数：writer 写入响应，request 提供查询参数和已经认证的机器身份。
+// 返回值：无；直接写入目录 JSON 或错误响应。
 func (handler *Handler) List(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := appctx.PrincipalFromContext(request.Context())
 	if !ok {
 		httpresponse.WriteError(writer, request, http.StatusUnauthorized, httperror.Unauthenticated)
 		return
 	}
-	page, pageErr := optionalPositiveInt(request.URL.Query().Get("page"))
-	pageSize, pageSizeErr := optionalPositiveInt(request.URL.Query().Get("page_size"))
+	params := request.URL.Query()
+	usernames, hasUsername := params["username"]
+	if hasUsername && (len(usernames) != 1 || strings.TrimSpace(usernames[0]) == "") {
+		httpresponse.WriteError(writer, request, http.StatusUnprocessableEntity, httperror.Validation)
+		return
+	}
+	page, pageErr := optionalPositiveInt(params.Get("page"))
+	pageSize, pageSizeErr := optionalPositiveInt(params.Get("page_size"))
 	if pageErr != nil || pageSizeErr != nil {
 		httpresponse.WriteError(writer, request, http.StatusUnprocessableEntity, httperror.Validation)
 		return
 	}
 	result, err := handler.service.List(request.Context(), principal, application.Query{
-		Keyword: request.URL.Query().Get("keyword"), UserID: request.URL.Query().Get("user_id"),
-		RoleCodes: request.URL.Query()["role_code"], RoleOrigins: request.URL.Query()["role_origin"],
+		Keyword: params.Get("keyword"), UserID: params.Get("user_id"),
+		Username: params.Get("username"), RoleCodes: params["role_code"], RoleOrigins: params["role_origin"],
 		Page: page, PageSize: pageSize,
 	})
 	if err != nil {

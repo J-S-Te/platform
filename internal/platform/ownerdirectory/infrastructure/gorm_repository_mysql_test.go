@@ -50,6 +50,7 @@ func createOwnerKeywordTables(t *testing.T, db *gorm.DB) {
 		"iam_bootstrap_state (tenant_id CHAR(26), first_super_admin_user_id CHAR(26), first_super_admin_account_id CHAR(26))",
 		"iam_tenant (id CHAR(26), code VARCHAR(32))",
 		"iam_user (id CHAR(26) CHARACTER SET ascii COLLATE ascii_bin, tenant_id CHAR(26), display_name VARCHAR(128), status VARCHAR(16), employment_status VARCHAR(32), deleted_at DATETIME NULL)",
+		"iam_account (tenant_id CHAR(26), user_id CHAR(26) CHARACTER SET ascii COLLATE ascii_bin, username VARCHAR(128) CHARACTER SET ascii COLLATE ascii_bin, account_type VARCHAR(32), status VARCHAR(32), valid_until DATETIME NULL)",
 		"iam_org_unit (id CHAR(26), tenant_id CHAR(26), name VARCHAR(128), status VARCHAR(16))",
 		"iam_position (id CHAR(26), tenant_id CHAR(26), org_unit_id CHAR(26), status VARCHAR(16))",
 		"iam_membership (tenant_id CHAR(26), user_id CHAR(26), org_unit_id CHAR(26), position_id CHAR(26), status VARCHAR(16), valid_from DATETIME NULL, valid_until DATETIME NULL, inherit_authorization BOOL, is_primary BOOL)",
@@ -66,6 +67,13 @@ func createOwnerKeywordTables(t *testing.T, db *gorm.DB) {
 		"INSERT INTO iam_tenant VALUES ('tenant','owner-test')",
 		"INSERT INTO iam_org_unit VALUES ('org','tenant','测试部门','ACTIVE')",
 		"INSERT INTO iam_user VALUES ('01K00000000000000000000001','tenant','负责人甲','ACTIVE','EMPLOYEE',NULL), ('01K00000000000000000000002','tenant','未授权人员','ACTIVE','EMPLOYEE',NULL), ('01K00000000000000000000003','tenant','A_%人员','ACTIVE','EMPLOYEE',NULL)",
+		`INSERT INTO iam_account VALUES
+			('tenant','01K00000000000000000000001','engineer-1','HUMAN','ACTIVE',NULL),
+			('tenant','01K00000000000000000000002','unassigned-user','HUMAN','ACTIVE',NULL),
+			('tenant','01K00000000000000000000001','disabled-user','HUMAN','DISABLED',NULL),
+			('tenant','01K00000000000000000000001','expired-user','HUMAN','ACTIVE','2000-01-01'),
+			('tenant','01K00000000000000000000001','machine-user','MACHINE','ACTIVE',NULL),
+			('other','01K00000000000000000000001','other-tenant','HUMAN','ACTIVE',NULL)`,
 		"INSERT INTO iam_membership VALUES ('tenant','01K00000000000000000000001','org','position','ACTIVE',NULL,NULL,0,1), ('tenant','01K00000000000000000000002','org','position','ACTIVE',NULL,NULL,0,1), ('tenant','01K00000000000000000000003','org','position','ACTIVE',NULL,NULL,0,1)",
 		"INSERT INTO authz_role VALUES ('role','tenant','app','ACTIVE','CUSTOM')",
 		"INSERT INTO authz_role_binding VALUES ('tenant','app','role','ACTIVE',NULL,NULL,'ENVIRONMENT','prod','USER','01K00000000000000000000001'), ('tenant','app','role','ACTIVE',NULL,NULL,'ENVIRONMENT','prod','USER','01K00000000000000000000003')",
@@ -77,7 +85,7 @@ func createOwnerKeywordTables(t *testing.T, db *gorm.DB) {
 	}
 }
 
-// TestOwnerDirectoryKeywordMySQL 验证中文搜索、标识查找和授权边界在真实MySQL下兼容。
+// TestOwnerDirectoryKeywordMySQL 验证中文姓名、登录用户名搜索与授权边界兼容。
 // 参数：t为测试上下文，数据库由显式独立测试DSN提供。
 // 返回值：无；字符集错误、模糊通配扩大结果或跨环境返回用户时失败。
 func TestOwnerDirectoryKeywordMySQL(t *testing.T) {
@@ -87,23 +95,35 @@ func TestOwnerDirectoryKeywordMySQL(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, test := range []struct {
-		name, keyword, environment, wantID string
+		name, keyword, username, environment, wantID string
 	}{
-		{"中文姓名", "负责人甲", "prod", "01K00000000000000000000001"},
-		{"中文部分匹配", "负责人", "prod", "01K00000000000000000000001"},
-		{"用户标识", "01K00000000000000000000001", "prod", "01K00000000000000000000001"},
-		{"中文无匹配", "不存在的人", "prod", ""},
-		{"未授权姓名", "未授权人员", "prod", ""},
-		{"其他环境", "负责人甲", "other", ""},
-		{"未授权标识", "01K00000000000000000000002", "prod", ""},
-		{"标识其他环境", "01K00000000000000000000001", "other", ""},
-		{"字面通配符", "_%", "prod", "01K00000000000000000000003"},
+		{"中文姓名", "负责人甲", "", "prod", "01K00000000000000000000001"},
+		{"中文部分匹配", "负责人", "", "prod", "01K00000000000000000000001"},
+		{"用户标识", "01K00000000000000000000001", "", "prod", "01K00000000000000000000001"},
+		{"中文无匹配", "不存在的人", "", "prod", ""},
+		{"未授权姓名", "未授权人员", "", "prod", ""},
+		{"其他环境", "负责人甲", "", "other", ""},
+		{"未授权标识", "01K00000000000000000000002", "", "prod", ""},
+		{"标识其他环境", "01K00000000000000000000001", "", "other", ""},
+		{"字面通配符", "_%", "", "prod", "01K00000000000000000000003"},
+		{"有效登录用户名", "", "engineer-1", "prod", "01K00000000000000000000001"},
+		{"用户名部分匹配", "", "engineer", "prod", ""},
+		{"用户名大小写不同", "", "Engineer-1", "prod", ""},
+		{"用户名其他环境", "", "engineer-1", "other", ""},
+		{"用户名其他租户", "", "other-tenant", "prod", ""},
+		{"用户名未授权", "", "unassigned-user", "prod", ""},
+		{"停用账号", "", "disabled-user", "prod", ""},
+		{"过期账号", "", "expired-user", "prod", ""},
+		{"机器账号", "", "machine-user", "prod", ""},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			page, err := repository.List(context.Background(), "tenant", "app", test.environment,
-				application.Query{Keyword: test.keyword, Page: 1, PageSize: 20})
+				application.Query{Keyword: test.keyword, Username: test.username, Page: 1, PageSize: 20})
 			if err != nil {
 				t.Fatalf("directory keyword lookup: %v", err)
+			}
+			if page.UsernameMatch != (test.username != "") {
+				t.Fatalf("unexpected username match marker: %t", page.UsernameMatch)
 			}
 			if test.wantID == "" {
 				if page.Total != 0 || len(page.Items) != 0 {
