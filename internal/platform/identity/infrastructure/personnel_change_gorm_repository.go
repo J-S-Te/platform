@@ -41,6 +41,8 @@ type personnelChangeModel struct {
 	TargetPosition       string     `gorm:"column:target_position_name;->"`
 	Version              uint64     `gorm:"column:version"`
 	CreatedAt, UpdatedAt time.Time
+
+	SubmittedByDisplayName string `gorm:"column:submitted_by_display_name;->;-:migration"`
 }
 
 // personnelApprovalExceptionOutboxModel 是超管例外审批的本地审计 outbox。它和审批状态在
@@ -349,8 +351,12 @@ func (r *PersonnelChangeGORMRepository) ValidateCreate(c context.Context, in app
 func requiresCreateTarget(changeType string) bool {
 	return changeType != domain.PersonnelChangeTermination
 }
+
+// toPersonnel 将异动请求和查询到的人名映射为统一返回对象。
+// 参数：m 为异动单记录，列表查询可附带人员和申请人姓名。
+// 返回值：完整异动单，无法解析的姓名保持为空。
 func toPersonnel(m personnelChangeModel) application.PersonnelChangeRequest {
-	return application.PersonnelChangeRequest{ID: m.ID, TenantID: m.TenantID, UserID: m.UserID, UserDisplayName: m.UserDisplayName, SourceMembershipID: deref(m.SourceMembershipID), SourceOrganization: m.SourceOrganization, SourcePosition: m.SourcePosition, TargetOrgUnitID: deref(m.TargetOrgUnitID), TargetOrganization: m.TargetOrganization, TargetPositionID: deref(m.TargetPositionID), TargetPosition: m.TargetPosition, ChangeType: m.ChangeType, Status: m.Status, Reason: m.Reason, ApprovalReference: deref(m.ApprovalReference), HandoverReference: deref(m.HandoverReference), RejectionReason: deref(m.RejectionReason), SubmittedBy: m.SubmittedBy, ApprovedBy: deref(m.ApprovedBy), EffectiveAt: &m.EffectiveAt, ApprovedAt: m.ApprovedAt, ExecutedAt: m.ExecutedAt, CancelledAt: m.CancelledAt, Version: m.Version, CreatedAt: m.CreatedAt, UpdatedAt: m.UpdatedAt}
+	return application.PersonnelChangeRequest{ID: m.ID, TenantID: m.TenantID, UserID: m.UserID, UserDisplayName: m.UserDisplayName, SourceMembershipID: deref(m.SourceMembershipID), SourceOrganization: m.SourceOrganization, SourcePosition: m.SourcePosition, TargetOrgUnitID: deref(m.TargetOrgUnitID), TargetOrganization: m.TargetOrganization, TargetPositionID: deref(m.TargetPositionID), TargetPosition: m.TargetPosition, ChangeType: m.ChangeType, Status: m.Status, Reason: m.Reason, ApprovalReference: deref(m.ApprovalReference), HandoverReference: deref(m.HandoverReference), RejectionReason: deref(m.RejectionReason), SubmittedBy: m.SubmittedBy, SubmittedByDisplayName: m.SubmittedByDisplayName, ApprovedBy: deref(m.ApprovedBy), EffectiveAt: &m.EffectiveAt, ApprovedAt: m.ApprovedAt, ExecutedAt: m.ExecutedAt, CancelledAt: m.CancelledAt, Version: m.Version, CreatedAt: m.CreatedAt, UpdatedAt: m.UpdatedAt}
 }
 func deref(s *string) string {
 	if s == nil {
@@ -391,16 +397,19 @@ func (r *PersonnelChangeGORMRepository) Create(c context.Context, v application.
 	return toPersonnel(m), nil
 }
 
-// List 联表补齐人员与来源/目标组织岗位展示名，过滤条件全部参数化并保持租户条件；
-// 结果按创建时间倒序。
+// List 读取租户的异动单并补齐涉及人员、申请人与任职名称。
+// 参数：c 为请求上下文，t 为租户，status、changeType、keyword 为可选筛选。
+// 返回值：创建时间倒序的异动单及数据库错误。
 func (r *PersonnelChangeGORMRepository) List(c context.Context, t, status, changeType, keyword string) (out []application.PersonnelChangeRequest, err error) {
 	q := r.db.WithContext(c).Table("iam_personnel_change_request AS pcr").
 		Select(`pcr.*, user.display_name AS user_display_name,
+			COALESCE(applicant.display_name, '') AS submitted_by_display_name,
 			COALESCE(source_org.name, '') AS source_organization_name,
 			COALESCE(source_position.name, '') AS source_position_name,
 			COALESCE(target_org.name, '') AS target_organization_name,
 			COALESCE(target_position.name, '') AS target_position_name`).
 		Joins("JOIN iam_user AS user ON user.tenant_id = pcr.tenant_id AND user.id = pcr.user_id").
+		Joins("LEFT JOIN iam_user AS applicant ON applicant.tenant_id = pcr.tenant_id AND applicant.id = pcr.submitted_by").
 		Joins("LEFT JOIN iam_membership AS source_membership ON source_membership.tenant_id = pcr.tenant_id AND source_membership.id = pcr.source_membership_id").
 		Joins("LEFT JOIN iam_org_unit AS source_org ON source_org.tenant_id = pcr.tenant_id AND source_org.id = source_membership.org_unit_id").
 		Joins("LEFT JOIN iam_position AS source_position ON source_position.tenant_id = pcr.tenant_id AND source_position.id = source_membership.position_id").

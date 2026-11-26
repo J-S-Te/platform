@@ -43,6 +43,8 @@ type PersonnelChangeRequest struct {
 	Version            uint64     `json:"version"`
 	CreatedAt          time.Time  `json:"created_at"`
 	UpdatedAt          time.Time  `json:"updated_at"`
+
+	SubmittedByDisplayName string `json:"submitted_by_display_name,omitempty"`
 }
 
 // PersonnelChangeCreateInput 是异动创建用例的输入；目标引用合法性由仓储在 ValidateCreate
