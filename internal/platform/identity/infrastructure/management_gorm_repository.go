@@ -432,11 +432,9 @@ func (repository *GORMRepository) UpdateUser(ctx context.Context, input applicat
 	return repository.GetUser(ctx, input.TenantID, input.UserID)
 }
 
-// DeleteUser 在既有人员删除事务内撤销对应会话。
+// DeleteUser 逻辑删除用户并在同一事务内停用其基础角色绑定、撤销会话。
 //
-//	DeleteUser 执行租户范围内的业务删除。用户、账号与任职行保留为停用记录以维持审计与
-//	外键完整性，但关联登录账号与任职从常规管理视图消失；既有会话在同一事务内吊销，
-//	被删用户立即失去访问。
+//	用户、账号、任职及基础角色绑定保留为停用记录，以维持审计与外键完整性。
 //
 // 参数：ctx为调用上下文与取消边界。
 //
@@ -513,11 +511,52 @@ func (repository *GORMRepository) DeleteUser(ctx context.Context, input applicat
 				return err
 			}
 		}
+		if err := disablePlatformUserRoleBindings(transaction, input, now); err != nil {
+			return err
+		}
 		if err := enqueueKeycloakIdentityEvents(transaction, input.TenantID, []string{input.UserID}, now, "IDENTITY_CHANGED"); err != nil {
 			return err
 		}
 		return nil
 	})
+}
+
+// disablePlatformUserRoleBindings 停用被删用户的基础角色绑定并刷新平台授权版本。
+// 参数：transaction 为删除事务，input 提供租户、用户和操作者，now 为删除时间。
+// 返回值：无匹配绑定或更新成功时返回 nil，写入失败时返回错误以回滚删除事务。
+func disablePlatformUserRoleBindings(transaction *gorm.DB, input application.UserDeleteInput, now time.Time) error {
+	platformApplication := transaction.Model(&bootstrapApplicationModel{}).Select("id").
+		Where("tenant_id = ? AND code = ?", input.TenantID, application.DefaultPlatformApplicationCode)
+	baselineRole := transaction.Model(&bootstrapRoleModel{}).Select("id").
+		Where("tenant_id = ? AND application_id IN (?) AND code = ?",
+			input.TenantID, platformApplication, application.DefaultUserRoleCode)
+
+	result := transaction.Model(&bootstrapRoleBindingModel{}).
+		Where("tenant_id = ? AND application_id IN (?) AND role_id IN (?)",
+			input.TenantID, platformApplication, baselineRole).
+		Where("subject_type = ? AND subject_id = ? AND status = ?", "USER", input.UserID, domain.StatusActive).
+		Updates(map[string]any{
+			"status": domain.StatusDisabled, "updated_at": now, "updated_by": input.OperatorID,
+			"version": gorm.Expr("version + 1"),
+		})
+	if result.Error != nil {
+		return mapWriteError(result.Error, "disable platform user role bindings")
+	}
+	if result.RowsAffected == 0 {
+		return nil
+	}
+	result = transaction.Model(&identityPolicyRevisionModel{}).
+		Where("tenant_id = ? AND application_id IN (?)", input.TenantID, platformApplication).
+		Updates(map[string]any{
+			"revision": gorm.Expr("revision + 1"), "changed_at": now, "change_reason": "删除员工并停用基础角色绑定",
+		})
+	if result.Error != nil {
+		return fmt.Errorf("advance platform authorization policy revision: %w", result.Error)
+	}
+	if result.RowsAffected == 0 {
+		return fmt.Errorf("advance platform authorization policy revision: %w", application.ErrNotFound)
+	}
+	return nil
 }
 
 // ListAccounts 列出租户范围内的账号（含密码初始化标记与关联用户名回填）。

@@ -2,6 +2,7 @@ package infrastructure_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"testing"
@@ -81,8 +82,8 @@ func newRevocationFixture(t *testing.T, database *gorm.DB, suffix string) revoca
 	}
 	t.Cleanup(func() {
 		for _, statement := range []string{
-			"DELETE FROM platform_oauth_backchannel_logout_outbox WHERE oauth_client_id = ?",
-			"DELETE FROM platform_oauth_backchannel_logout_uri WHERE oauth_client_id = ?",
+			"DELETE FROM platform_oauth_backchannel_logout_outbox WHERE oauth_client_id IN (SELECT id FROM platform_oauth_client WHERE tenant_id = ?)",
+			"DELETE FROM platform_oauth_backchannel_logout_uri WHERE oauth_client_id IN (SELECT id FROM platform_oauth_client WHERE tenant_id = ?)",
 			"DELETE FROM oauth_authorization_code WHERE tenant_id = ?",
 			"DELETE FROM oauth_refresh_token WHERE tenant_id = ?",
 			"DELETE FROM oauth_token_family WHERE tenant_id = ?",
@@ -200,7 +201,7 @@ func TestDisableUserRevokesSessionsAndOAuthTokensOnMySQL(t *testing.T) {
 	database := revocationTestDatabase(t)
 	repository := revocationRepository(t, database)
 	ctx := context.Background()
-	fixture := newRevocationFixture(t, database, "disable-user")
+	fixture := newRevocationFixture(t, database, "off-user")
 
 	disabled := identitydomain.StatusDisabled
 	if _, err := repository.UpdateUser(ctx, application.UserUpdateInput{
@@ -237,12 +238,137 @@ func TestDeleteUserRevokesSessionsAndOAuthTokensOnMySQL(t *testing.T) {
 	assertAccountFullyRevoked(t, database, fixture)
 }
 
+// TestDeleteUserDisablesPlatformUserBindingOnMySQL 验证删除用户时停用并保留基础角色绑定。
+// 参数：t 为 MySQL 回归测试上下文。
+// 返回值：无。
+func TestDeleteUserDisablesPlatformUserBindingOnMySQL(t *testing.T) {
+	database := revocationTestDatabase(t)
+	repository := revocationRepository(t, database)
+	fixture := newRevocationFixture(t, database, "del-role")
+	const operatorID = "rev-delete-operator"
+	const platformAppID = "rev-platform-del-role"
+	const businessAppID = "rev-app-del-role"
+	const baselineRoleID = "rev-platform-user-role"
+	const exceptionRoleID = "rev-exception-role"
+	const businessRoleID = "rev-business-user-role"
+	now := time.Now().UTC().Add(-time.Minute).Truncate(time.Millisecond)
+	seed := func(table string, values map[string]any) {
+		t.Helper()
+		values["tenant_id"] = fixture.tenantID
+		if err := database.Table(table).Create(values).Error; err != nil {
+			t.Fatalf("seed %s: %v", table, err)
+		}
+	}
+	t.Cleanup(func() {
+		for _, table := range []string{"authz_role_binding", "authz_role", "authz_policy_revision"} {
+			if err := database.Exec("DELETE FROM "+table+" WHERE tenant_id = ?", fixture.tenantID).Error; err != nil {
+				t.Errorf("clean %s: %v", table, err)
+			}
+		}
+	})
+	seed("platform_application", map[string]any{
+		"id": platformAppID, "code": application.DefaultPlatformApplicationCode, "name": "Platform test",
+		"application_type": "PLATFORM", "status": "ACTIVE", "version": 1, "created_at": now, "updated_at": now,
+	})
+	for _, role := range []struct{ id, applicationID, code, roleType string }{
+		{baselineRoleID, platformAppID, application.DefaultUserRoleCode, "PLATFORM"},
+		{exceptionRoleID, platformAppID, "platform-revocation-exception", "PLATFORM"},
+		{businessRoleID, businessAppID, application.DefaultUserRoleCode, "APPLICATION"},
+	} {
+		seed("authz_role", map[string]any{
+			"id": role.id, "application_id": role.applicationID, "code": role.code, "name": role.code,
+			"role_type": role.roleType, "status": "ACTIVE", "version": 1, "created_at": now, "updated_at": now,
+		})
+	}
+	seed("authz_policy_revision", map[string]any{
+		"application_id": businessAppID, "revision": 7, "changed_at": now, "change_reason": "test setup",
+	})
+
+	bindings := []struct {
+		id, applicationID, roleID, subjectType, subjectID, origin, scopeType, scopeID, status string
+		disable                                                                               bool
+	}{
+		{"rev-binding-baseline", platformAppID, baselineRoleID, "USER", fixture.userID, "", "TENANT", "", "ACTIVE", true},
+		{"rev-binding-system", platformAppID, baselineRoleID, "USER", fixture.userID, "SYSTEM", "ORG_UNIT", fixture.orgUnitID, "ACTIVE", true},
+		{"rev-binding-exception", platformAppID, exceptionRoleID, "USER", fixture.userID, "MANUAL", "TENANT", "", "ACTIVE", false},
+		{"rev-binding-business", businessAppID, businessRoleID, "USER", fixture.userID, "MANUAL", "TENANT", "", "ACTIVE", false},
+		{"rev-binding-org", platformAppID, baselineRoleID, "ORG_UNIT", fixture.orgUnitID, "MANUAL", "TENANT", "", "ACTIVE", false},
+		{"rev-binding-disabled", platformAppID, baselineRoleID, "USER", fixture.userID, "MANUAL", "RESOURCE", fixture.positionID, "DISABLED", false},
+	}
+	for _, binding := range bindings {
+		seed("authz_role_binding", map[string]any{
+			"id": binding.id, "application_id": binding.applicationID, "role_id": binding.roleID,
+			"subject_type": binding.subjectType, "subject_id": binding.subjectID, "grant_origin": binding.origin,
+			"scope_type": binding.scopeType, "scope_id": binding.scopeID, "status": binding.status, "version": 4,
+			"created_at": now, "created_by": "rev-create-operator", "updated_at": now, "updated_by": "rev-create-operator",
+		})
+	}
+
+	ctx := context.Background()
+	deletion := application.UserDeleteInput{
+		TenantID: fixture.tenantID, OperatorID: operatorID, UserID: fixture.userID, Version: 1,
+	}
+	if err := repository.DeleteUser(ctx, deletion); !errors.Is(err, application.ErrNotFound) {
+		t.Fatalf("DeleteUser() without platform policy revision = %v, want missing revision error", err)
+	}
+	if employee, err := repository.GetUser(ctx, fixture.tenantID, fixture.userID); err != nil || employee.Status != identitydomain.StatusActive || employee.Version != deletion.Version {
+		t.Fatalf("employee deletion did not roll back: status=%q version=%d error=%v", employee.Status, employee.Version, err)
+	}
+	var activeBaselineBindings int64
+	if err := database.Table("authz_role_binding").
+		Where("role_id = ? AND subject_type = ? AND subject_id = ? AND status = ? AND version = ?",
+			baselineRoleID, "USER", fixture.userID, "ACTIVE", 4).Count(&activeBaselineBindings).Error; err != nil {
+		t.Fatalf("read baseline bindings after rollback: %v", err)
+	}
+	if activeBaselineBindings != 2 {
+		t.Fatalf("active baseline bindings after rollback = %d, want 2", activeBaselineBindings)
+	}
+
+	seed("authz_policy_revision", map[string]any{
+		"application_id": platformAppID, "revision": 7, "changed_at": now, "change_reason": "test setup",
+	})
+	if err := repository.DeleteUser(ctx, deletion); err != nil {
+		t.Fatalf("DeleteUser() error = %v", err)
+	}
+
+	for _, binding := range bindings {
+		var saved struct {
+			Status, GrantOrigin, CreatedBy, UpdatedBy string
+			CreatedAt, UpdatedAt                      time.Time
+			Version                                   uint64
+		}
+		if err := database.Table("authz_role_binding").Where("id = ?", binding.id).Take(&saved).Error; err != nil {
+			t.Fatalf("read retained binding %s: %v", binding.id, err)
+		}
+		if saved.GrantOrigin != binding.origin || saved.CreatedBy != "rev-create-operator" || !saved.CreatedAt.Equal(now) {
+			t.Errorf("binding %s lost its original audit fields: %+v", binding.id, saved)
+		}
+		if binding.disable {
+			if saved.Status != "DISABLED" || saved.Version != 5 || saved.UpdatedBy != operatorID || !saved.UpdatedAt.After(now) {
+				t.Errorf("binding %s should be disabled with deletion audit fields: %+v", binding.id, saved)
+			}
+		} else if saved.Status != binding.status || saved.Version != 4 || saved.UpdatedBy != "rev-create-operator" || !saved.UpdatedAt.Equal(now) {
+			t.Errorf("binding %s should remain unchanged: %+v", binding.id, saved)
+		}
+	}
+	for applicationID, want := range map[string]uint64{platformAppID: 8, businessAppID: 7} {
+		var revision uint64
+		if err := database.Table("authz_policy_revision").Select("revision").
+			Where("tenant_id = ? AND application_id = ?", fixture.tenantID, applicationID).Scan(&revision).Error; err != nil {
+			t.Fatalf("read authorization revision for %s: %v", applicationID, err)
+		}
+		if revision != want {
+			t.Errorf("authorization revision for %s = %d, want %d", applicationID, revision, want)
+		}
+	}
+}
+
 // 停用账号：账号级停用同样撤销令牌族、刷新令牌、授权码并登记回信道登出。
 func TestDisableAccountRevokesSessionsAndOAuthTokensOnMySQL(t *testing.T) {
 	database := revocationTestDatabase(t)
 	repository := revocationRepository(t, database)
 	ctx := context.Background()
-	fixture := newRevocationFixture(t, database, "disable-account")
+	fixture := newRevocationFixture(t, database, "off-acct")
 
 	if _, err := repository.UpdateAccount(ctx, application.AccountUpdateInput{
 		TenantID: fixture.tenantID, OperatorID: "rev-operator", AccountID: fixture.accountID,
