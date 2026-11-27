@@ -3,10 +3,12 @@ package identityhttp
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"testing"
 
 	"github.com/J-S-Te/Basic-Platform/internal/platform/authorization/managementscope"
@@ -155,6 +157,126 @@ func TestCreateEmployeeAllowsMembershipInsideManagementScope(t *testing.T) {
 	}
 	if service.lastEmployeeInput.TenantID != "tenant-1" || service.lastEmployeeInput.OperatorID != "operator-1" {
 		t.Fatalf("input tenant/operator = %s/%s, want tenant-1/operator-1", service.lastEmployeeInput.TenantID, service.lastEmployeeInput.OperatorID)
+	}
+}
+
+// TestCreateEmployeeUsesScopedMembershipGrant 验证组织级任职授权不依赖租户级权限码。
+// 参数：t 为测试上下文。
+// 返回值：无。
+func TestCreateEmployeeUsesScopedMembershipGrant(t *testing.T) {
+	for _, testcase := range []struct {
+		name string
+		org  string
+		want int
+	}{
+		{"组织范围内", "org-tech", http.StatusCreated},
+		{"组织范围外", "org-sales", http.StatusForbidden},
+	} {
+		t.Run(testcase.name, func(t *testing.T) {
+			service := &employeeScopeServiceStub{}
+			authorizer := &employeeScopeAuthorizer{scopes: map[string]managementscope.Scope{
+				"platform:membership:create": organizationScope("org-tech"),
+			}}
+			handler := newEmployeeScopeHandler(t, service, authorizer)
+			recorder := httptest.NewRecorder()
+			body := `{"user":{"display_name":"员工"},"membership":{"org_unit_id":"` + testcase.org +
+				`","position_id":"pos-1","membership_type":"PRIMARY"}}`
+			handler.CreateEmployee(recorder, employeeScopeRequest(t, http.MethodPost,
+				"/api/v1/employees", body, "platform:user:create"))
+			if recorder.Code != testcase.want {
+				t.Fatalf("status = %d, want %d", recorder.Code, testcase.want)
+			}
+			if len(authorizer.resolved) != 1 || authorizer.resolved[0] != "platform:membership:create" {
+				t.Fatalf("expected one membership scope lookup, got %v", authorizer.resolved)
+			}
+			wantCalls := 0
+			if testcase.want == http.StatusCreated {
+				wantCalls = 1
+			}
+			if service.createEmployeeCalls != wantCalls {
+				t.Fatalf("CreateEmployee calls = %d, want %d", service.createEmployeeCalls, wantCalls)
+			}
+		})
+	}
+}
+
+// TestCreateEmployeeRequiresAccountPermissionWithScopedMembershipGrant 验证账号创建仍须单独授权。
+// 参数：t 为测试上下文。
+// 返回值：无。
+func TestCreateEmployeeRequiresAccountPermissionWithScopedMembershipGrant(t *testing.T) {
+	service := &employeeScopeServiceStub{}
+	authorizer := &employeeScopeAuthorizer{scopes: map[string]managementscope.Scope{
+		"platform:membership:create": organizationScope("org-tech"),
+	}}
+	handler := newEmployeeScopeHandler(t, service, authorizer)
+	recorder := httptest.NewRecorder()
+	body := `{"user":{"display_name":"员工"},"account":{"account_name":"employee-fixture"},"membership":{"org_unit_id":"org-tech"}}`
+	handler.CreateEmployee(recorder, employeeScopeRequest(t, http.MethodPost,
+		"/api/v1/employees", body, "platform:user:create"))
+	if recorder.Code != http.StatusForbidden || len(authorizer.resolved) != 0 ||
+		service.createEmployeeCalls != 0 {
+		t.Fatalf("status=%d, scope lookups=%v, writes=%d", recorder.Code, authorizer.resolved, service.createEmployeeCalls)
+	}
+}
+
+// TestEmployeeOnboardingPermissionsProjectsOnlyOrgScope 验证入职预检只返回有效组织范围与账号权限。
+// 参数：t 为测试上下文。
+// 返回值：无。
+func TestEmployeeOnboardingPermissionsProjectsOnlyOrgScope(t *testing.T) {
+	for _, testcase := range []struct {
+		name  string
+		scope managementscope.Scope
+		codes []string
+		want  employeeOnboardingPermissionsResponse
+	}{
+		{
+			name:  "组织及后代授权，缺少账号权限",
+			scope: organizationScope("org-tech", "org-tech-child"),
+			codes: []string{"platform:user:create"},
+			want:  employeeOnboardingPermissionsResponse{OrganizationIDs: []string{"org-tech", "org-tech-child"}},
+		},
+		{
+			name:  "租户级授权，具备账号权限",
+			scope: managementscope.Scope{Unrestricted: true},
+			codes: []string{"platform:user:create", "platform:account:create"},
+			want:  employeeOnboardingPermissionsResponse{CanCreateAccount: true, AllOrganizations: true, OrganizationIDs: []string{}},
+		},
+		{
+			name:  "只有既有任职资源范围",
+			scope: managementscope.Scope{ResourceIDs: []string{"membership-existing"}},
+			codes: []string{"platform:user:create", "platform:membership:create"},
+			want:  employeeOnboardingPermissionsResponse{OrganizationIDs: []string{}},
+		},
+	} {
+		t.Run(testcase.name, func(t *testing.T) {
+			service := &employeeScopeServiceStub{}
+			authorizer := &employeeScopeAuthorizer{scopes: map[string]managementscope.Scope{
+				"platform:membership:create": testcase.scope,
+			}}
+			handler := newEmployeeScopeHandler(t, service, authorizer)
+			recorder := httptest.NewRecorder()
+			handler.EmployeeOnboardingPermissions(recorder, employeeScopeRequest(t, http.MethodGet,
+				"/api/v1/employees/onboarding-permissions", "", testcase.codes...))
+			if recorder.Code != http.StatusOK || recorder.Header().Get("Cache-Control") != "no-store" {
+				t.Fatalf("unexpected status or cache policy: %d, %q", recorder.Code, recorder.Header().Get("Cache-Control"))
+			}
+			var result struct {
+				Data employeeOnboardingPermissionsResponse `json:"data"`
+			}
+			if err := json.Unmarshal(recorder.Body.Bytes(), &result); err != nil {
+				t.Fatalf("decode response: %v", err)
+			}
+			got := result.Data
+			if got.CanCreateAccount != testcase.want.CanCreateAccount ||
+				got.AllOrganizations != testcase.want.AllOrganizations ||
+				got.OrganizationIDs == nil || !slices.Equal(got.OrganizationIDs, testcase.want.OrganizationIDs) {
+				t.Fatalf("permissions = %+v, want %+v", got, testcase.want)
+			}
+			if service.createEmployeeCalls != 0 || !slices.Equal(authorizer.resolved, []string{"platform:membership:create"}) {
+				t.Fatalf("expected one membership scope lookup without writes, got %v and %d writes",
+					authorizer.resolved, service.createEmployeeCalls)
+			}
+		})
 	}
 }
 

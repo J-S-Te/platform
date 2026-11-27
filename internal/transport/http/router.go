@@ -328,6 +328,7 @@ func NewRouter(
 		if managementHandler != nil {
 			apiRouter.GET("/users", middleware.RequirePermission("platform:user:read"), adaptHandler(managementHandler.ListUsers))
 			apiRouter.POST("/users", middleware.RequirePermission("platform:user:create"), adaptHandler(managementHandler.CreateUser))
+			apiRouter.GET("/employees/onboarding-permissions", middleware.RequirePermission("platform:user:create"), adaptHandler(managementHandler.EmployeeOnboardingPermissions))
 			apiRouter.POST("/employees", middleware.RequirePermission("platform:user:create"), adaptHandler(credentialJSON(credentialcrypto.PurposeCreateEmployee, "employee.create", managementHandler.CreateEmployee)))
 			apiRouter.POST("/employees/batch", middleware.RequirePermission("platform:user:create"), adaptHandler(credentialBatch(credentialcrypto.PurposeCreateEmployees, "employee.batch", managementHandler.CreateEmployeesBatch)))
 			apiRouter.POST("/users/batch", middleware.RequirePermission("platform:user:create"), adaptHandler(managementHandler.CreateUsersBatch))

@@ -370,11 +370,9 @@ func (handler *ManagementHandler) CreateUser(writer http.ResponseWriter, request
 	httpresponse.WriteSuccess(writer, request, http.StatusCreated, "用户已创建", response)
 }
 
-// 员工入职会在一个应用事务内创建用户、平台基线角色以及可选账号和首个任职。HTTP 层
-// 根据请求实际包含的子资源追加检查账号、任职权限，避免只有用户创建权限的操作者借聚合
-// 接口间接创建账号或任职；独立资源接口仅用于维护和例外流程。
-// 参数：writer 输出响应，request 为当前已认证的管理请求。
-// 返回值：无；输出当前管理操作的业务回执或安全错误。
+// CreateEmployee 按当前账号权限与目标组织范围原子创建员工、平台基线角色、任职和可选账号。
+// 参数：writer 用于返回入职结果，request 提供认证主体及入职表单。
+// 返回值：无。未授权请求在调用应用服务前被拒绝。
 func (handler *ManagementHandler) CreateEmployee(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := authctx.PrincipalFromContext(request.Context())
 	if !ok {
@@ -390,17 +388,10 @@ func (handler *ManagementHandler) CreateEmployee(writer http.ResponseWriter, req
 		httpresponse.WriteError(writer, request, http.StatusForbidden, httperror.Forbidden)
 		return
 	}
-	if payload.Membership != nil {
-		if !principalHasPermission(principal, "platform:membership:create") {
-			httpresponse.WriteError(writer, request, http.StatusForbidden, httperror.Forbidden)
-			return
-		}
-		// 聚合入口在用户创建权限之外还会创建任职，因此任职的组织范围必须和独立的
-		// /memberships 入口一样在调用服务之前判定，否则受限操作者可以借入职接口在
-		// 范围外组织写入任职。
-		if !handler.requireMembershipCreationScope(writer, request, principal, payload.Membership.OrgUnitID) {
-			return
-		}
+	// 租户级会话权限码不包含组织级绑定。创建任职的权限和范围须从同一份有效授权解析。
+	if payload.Membership != nil &&
+		!handler.requireMembershipCreationScope(writer, request, principal, payload.Membership.OrgUnitID) {
+		return
 	}
 	status := domain.StatusActive
 	if payload.User.Status != nil {
@@ -1246,9 +1237,10 @@ func (handler *ManagementHandler) writeMembership(writer http.ResponseWriter, re
 	httpresponse.WriteSuccess(writer, request, http.StatusOK, "任职已更新", toMembershipResponse(result))
 }
 
-func (handler *ManagementHandler) requireManagementScope(writer http.ResponseWriter, request *http.Request, principal authctx.Principal, permissionCode string) (managementscope.Scope, bool) {
-	// 会话中的扁平权限码只决定是否可能执行操作；实际可管理的组织和资源范围由服务端
-	// 根据当前主体重新解析，避免把前端提交的 org_unit_id 当成授权证据。
+// 用途：根据当前有效角色绑定解析指定权限的管理范围。
+// 参数：writer、request 为 HTTP 请求上下文，principal 为认证主体，permissionCode 指定管理权限。
+// 返回值：当前范围（可为空）；解析失败时已写入错误响应并返回 false。
+func (handler *ManagementHandler) resolveManagementScope(writer http.ResponseWriter, request *http.Request, principal authctx.Principal, permissionCode string) (managementscope.Scope, bool) {
 	scope, err := handler.scopeAuthorizer.Resolve(request.Context(), managementscope.Subject{
 		TenantID:  principal.Tenant.ID,
 		UserID:    principal.User.ID,
@@ -1257,6 +1249,17 @@ func (handler *ManagementHandler) requireManagementScope(writer http.ResponseWri
 	if err != nil {
 		handler.logger.Error("resolve management authorization scope", "permission", permissionCode, "error", err)
 		httpresponse.WriteError(writer, request, http.StatusInternalServerError, httperror.Internal)
+		return managementscope.Scope{}, false
+	}
+	return scope, true
+}
+
+// 用途：执行管理权限的范围检查，拒绝空范围。
+// 参数：writer、request 为 HTTP 请求上下文，principal 为认证主体，permissionCode 指定管理权限。
+// 返回值：有效管理范围及是否可继续办理。
+func (handler *ManagementHandler) requireManagementScope(writer http.ResponseWriter, request *http.Request, principal authctx.Principal, permissionCode string) (managementscope.Scope, bool) {
+	scope, ok := handler.resolveManagementScope(writer, request, principal, permissionCode)
+	if !ok {
 		return managementscope.Scope{}, false
 	}
 	if scope.Empty() {

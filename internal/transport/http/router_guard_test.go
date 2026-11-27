@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-// 安全审查 SEC-B8 路由表守卫：组织/岗位/任职的10条变更/读取路由必须在注册点显式
+// 安全审查 SEC-B8 路由表守卫：组织、岗位、任职及单条入职路由必须在注册点显式
 // 声明路由级 RequirePermission（与 handler 内 scope 检查同权限码）。真实会话链的
 // 端到端403 依赖 DB 会话存储与未导出的 handler 构造接口（见任务 description 的
 // 测试边界说明），本守卫直接锁定“路由不再自文档化授权要求”这一原始问题：
@@ -29,6 +29,8 @@ func TestOrgPositionMembershipRoutesDeclareRouteLevelPermissions(t *testing.T) {
 		{method: "GET", path: "/memberships", permission: "platform:membership:read"},
 		{method: "POST", path: "/memberships", permission: "platform:membership:create"},
 		{method: "PATCH", path: "/memberships/:membership_id", permission: "platform:membership:update"},
+		{method: "POST", path: "/employees", permission: "platform:user:create"},
+		{method: "GET", path: "/employees/onboarding-permissions", permission: "platform:user:create"},
 	}
 	for _, route := range routes {
 		matched := false
